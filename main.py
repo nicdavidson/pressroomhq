@@ -13,6 +13,7 @@ from api.content import router as content_router
 from api.pipeline import router as pipeline_router
 from api.webhook import router as webhook_router
 from api.publish import router as publish_router
+from api.settings import router as settings_router
 
 
 @asynccontextmanager
@@ -36,18 +37,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/api/health")
+async def health():
+    return {"status": "on the wire", "version": "0.1.0"}
+
 app.include_router(signals_router)
 app.include_router(content_router)
 app.include_router(pipeline_router)
 app.include_router(webhook_router)
 app.include_router(publish_router)
+app.include_router(settings_router)
 
-# Serve frontend static files if built
+# Serve frontend static files if built — MUST be last (catch-all)
 frontend_dist = Path(__file__).parent / "frontend" / "dist"
 if frontend_dist.exists():
     app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
-
-
-@app.get("/api/health")
-async def health():
-    return {"status": "on the wire", "version": "0.1.0"}

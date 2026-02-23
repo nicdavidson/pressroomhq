@@ -1,4 +1,8 @@
-"""Content Engine — Claude-powered content generation from signals and briefs."""
+"""Content Engine — Claude-powered content generation from signals and briefs.
+
+Uses memory context (approved examples, spiked anti-patterns, recent topics)
+from the content ledger to improve generation quality over time.
+"""
 
 import anthropic
 from config import settings
@@ -87,10 +91,41 @@ Rules:
 }
 
 
+def _build_memory_block(memory: dict | None, channel: ContentChannel) -> str:
+    """Build a memory context block for the generation prompt."""
+    if not memory:
+        return ""
+
+    ch = channel.value
+    parts = []
+
+    approved = memory.get("approved", {}).get(ch, [])
+    if approved:
+        parts.append("PREVIOUSLY APPROVED (write MORE like these):")
+        for item in approved[:3]:
+            parts.append(f"  - {item.get('headline', 'N/A')}")
+
+    spiked = memory.get("spiked", {}).get(ch, [])
+    if spiked:
+        parts.append("PREVIOUSLY SPIKED (write LESS like these):")
+        for item in spiked[:3]:
+            parts.append(f"  - {item.get('headline', 'N/A')}")
+
+    recent = memory.get("recent_topics", [])
+    if recent:
+        recent_headlines = [r.get("headline", "") for r in recent[:10] if r.get("headline")]
+        if recent_headlines:
+            parts.append("RECENT TOPICS (avoid repeating):")
+            for h in recent_headlines:
+                parts.append(f"  - {h}")
+
+    return "\n".join(parts) if parts else ""
+
+
 async def generate_brief(signals: list[dict]) -> dict:
     """Synthesize signals into a daily brief with recommended angle."""
     signal_text = "\n\n".join(
-        f"[{s.get('type', 'unknown')}] {s['title']}\n{s.get('body', '')[:500]}"
+        f"[{s.get('type', 'unknown')}] {s.get('title', '')}\n{s.get('body', '')[:500]}"
         for s in signals
     )
 
@@ -110,16 +145,20 @@ TOP SIGNALS: Ranked list of the 3-5 most actionable signals with one-line reason
     return {"summary": text, "angle": text.split("ANGLE:")[-1].split("\n")[0].strip() if "ANGLE:" in text else ""}
 
 
-async def generate_content(brief: str, signals: list[dict], channel: ContentChannel) -> dict:
+async def generate_content(brief: str, signals: list[dict], channel: ContentChannel,
+                           memory: dict | None = None) -> dict:
     """Generate content for a specific channel from a brief and signals."""
     prompt_config = CHANNEL_PROMPTS.get(channel)
     if not prompt_config:
         raise ValueError(f"No prompt config for channel: {channel}")
 
     signal_context = "\n\n".join(
-        f"[{s.get('type', 'unknown')}] {s['title']}\n{s.get('body', '')[:300]}"
+        f"[{s.get('type', 'unknown')}] {s.get('title', '')}\n{s.get('body', '')[:300]}"
         for s in signals[:5]
     )
+
+    memory_block = _build_memory_block(memory, channel)
+    memory_section = f"\n\nContent memory (learn from past approvals/rejections):\n{memory_block}" if memory_block else ""
 
     response = client.messages.create(
         model=settings.claude_model,
@@ -127,12 +166,11 @@ async def generate_content(brief: str, signals: list[dict], channel: ContentChan
         system=prompt_config["system"],
         messages=[{
             "role": "user",
-            "content": f"Daily brief:\n{brief}\n\nKey signals:\n{signal_context}\n\nGenerate the content now.",
+            "content": f"Daily brief:\n{brief}\n\nKey signals:\n{signal_context}{memory_section}\n\nGenerate the content now.",
         }],
     )
 
     body = response.content[0].text
-    # Extract first line as headline
     lines = body.strip().split("\n")
     headline = lines[0].strip().strip("#").strip('"').strip("*").strip()
 
@@ -143,7 +181,9 @@ async def generate_content(brief: str, signals: list[dict], channel: ContentChan
     }
 
 
-async def generate_all_content(brief: str, signals: list[dict], channels: list[ContentChannel] | None = None) -> list[dict]:
+async def generate_all_content(brief: str, signals: list[dict],
+                                channels: list[ContentChannel] | None = None,
+                                memory: dict | None = None) -> list[dict]:
     """Generate content across all channels (or specified subset)."""
     target_channels = channels or [
         ContentChannel.linkedin,
@@ -154,7 +194,7 @@ async def generate_all_content(brief: str, signals: list[dict], channels: list[C
 
     results = []
     for channel in target_channels:
-        result = await generate_content(brief, signals, channel)
+        result = await generate_content(brief, signals, channel, memory=memory)
         results.append(result)
 
     return results

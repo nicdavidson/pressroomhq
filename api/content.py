@@ -1,13 +1,10 @@
 """Content endpoints — approval queue, content management."""
 
-import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db
-from models import Content, ContentStatus
+from database import get_data_layer
+from services.data_layer import DataLayer
 
 router = APIRouter(prefix="/api/content", tags=["content"])
 
@@ -20,69 +17,35 @@ class ActionRequest(BaseModel):
 async def list_content(
     status: str | None = None,
     limit: int = 50,
-    db: AsyncSession = Depends(get_db),
+    dl: DataLayer = Depends(get_data_layer),
 ):
-    query = select(Content).order_by(Content.created_at.desc()).limit(limit)
-    if status:
-        query = query.where(Content.status == ContentStatus(status))
-    result = await db.execute(query)
-    items = result.scalars().all()
-    return [_serialize(c) for c in items]
+    return await dl.list_content(status=status, limit=limit)
 
 
 @router.get("/queue")
-async def approval_queue(db: AsyncSession = Depends(get_db)):
+async def approval_queue(dl: DataLayer = Depends(get_data_layer)):
     """The editor's desk — all content awaiting approval."""
-    result = await db.execute(
-        select(Content)
-        .where(Content.status == ContentStatus.queued)
-        .order_by(Content.created_at.desc())
-    )
-    items = result.scalars().all()
-    return [_serialize(c) for c in items]
+    return await dl.list_content(status="queued")
 
 
 @router.get("/{content_id}")
-async def get_content(content_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Content).where(Content.id == content_id))
-    c = result.scalar_one_or_none()
+async def get_content(content_id: int, dl: DataLayer = Depends(get_data_layer)):
+    c = await dl.get_content(content_id)
     if not c:
         raise HTTPException(status_code=404, detail="Content not found")
-    return _serialize(c)
+    return c
 
 
 @router.post("/{content_id}/action")
-async def content_action(content_id: int, req: ActionRequest, db: AsyncSession = Depends(get_db)):
+async def content_action(content_id: int, req: ActionRequest, dl: DataLayer = Depends(get_data_layer)):
     """Approve or spike a piece of content."""
-    result = await db.execute(select(Content).where(Content.id == content_id))
-    c = result.scalar_one_or_none()
+    c = await dl.get_content(content_id)
     if not c:
         raise HTTPException(status_code=404, detail="Content not found")
 
-    if req.action == "approve":
-        c.status = ContentStatus.approved
-        c.approved_at = datetime.datetime.utcnow()
-    elif req.action == "spike":
-        c.status = ContentStatus.spiked
-    else:
+    if req.action not in ("approve", "spike"):
         raise HTTPException(status_code=400, detail=f"Unknown action: {req.action}")
 
-    await db.commit()
-    return _serialize(c)
-
-
-def _serialize(c: Content) -> dict:
-    return {
-        "id": c.id,
-        "signal_id": c.signal_id,
-        "brief_id": c.brief_id,
-        "channel": c.channel.value,
-        "status": c.status.value,
-        "headline": c.headline,
-        "body": c.body,
-        "body_raw": c.body_raw,
-        "author": c.author,
-        "created_at": c.created_at.isoformat() if c.created_at else None,
-        "approved_at": c.approved_at.isoformat() if c.approved_at else None,
-        "published_at": c.published_at.isoformat() if c.published_at else None,
-    }
+    result = await dl.update_content_status(content_id, "approved" if req.action == "approve" else "spiked")
+    await dl.commit()
+    return result

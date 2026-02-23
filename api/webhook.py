@@ -1,13 +1,14 @@
 """GitHub webhook — release events trigger full content cascade."""
 
+import datetime
 import hashlib
 import hmac
 from fastapi import APIRouter, Request, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from database import get_db
-from models import Signal, SignalType, Brief, Content, ContentStatus, ContentChannel
+from database import get_data_layer
+from models import ContentChannel
+from services.data_layer import DataLayer
 from services.engine import generate_brief, generate_all_content
 from services.humanizer import humanize
 
@@ -17,13 +18,13 @@ router = APIRouter(prefix="/api/webhook", tags=["webhook"])
 def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
     """Verify GitHub webhook signature (HMAC-SHA256)."""
     if not secret:
-        return True  # No secret configured, skip verification
+        return True
     expected = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
 
 
 @router.post("/github")
-async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+async def github_webhook(request: Request, dl: DataLayer = Depends(get_data_layer)):
     """Handle GitHub webhook events. Releases trigger the full content cascade."""
     body = await request.body()
     signature = request.headers.get("X-Hub-Signature-256", "")
@@ -39,21 +40,16 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         return {"status": "pong"}
 
     if event == "release":
-        return await handle_release(payload, db)
+        return await handle_release(payload, dl)
 
     if event == "push":
-        return await handle_push(payload, db)
+        return await handle_push(payload, dl)
 
     return {"status": "ignored", "event": event}
 
 
-async def handle_release(payload: dict, db: AsyncSession) -> dict:
-    """GitHub release → full content cascade.
-
-    This is the killer demo moment:
-    One git event → release notes, announcement email, LinkedIn post,
-    X thread, blog draft, newsletter section — all queued for approval.
-    """
+async def handle_release(payload: dict, dl: DataLayer) -> dict:
+    """GitHub release → full content cascade."""
     release = payload.get("release", {})
     repo = payload.get("repository", {})
     repo_name = repo.get("full_name", "unknown/unknown")
@@ -62,21 +58,17 @@ async def handle_release(payload: dict, db: AsyncSession) -> dict:
     name = release.get("name", tag)
     body = release.get("body", "")
     url = release.get("html_url", "")
-    author = release.get("author", {}).get("login", "")
 
     # Save as signal
-    signal = Signal(
-        type=SignalType.github_release,
-        source=repo_name,
-        title=f"{repo_name} — {tag}: {name}",
-        body=body[:2000],
-        url=url,
-        raw_data=str(payload)[:5000],
-    )
-    db.add(signal)
-    await db.flush()
+    signal = await dl.save_signal({
+        "type": "github_release",
+        "source": repo_name,
+        "title": f"{repo_name} — {tag}: {name}",
+        "body": body[:2000],
+        "url": url,
+        "raw_data": str(payload)[:5000],
+    })
 
-    # Generate brief from this single release signal
     signal_dicts = [{
         "type": "github_release",
         "source": repo_name,
@@ -85,16 +77,14 @@ async def handle_release(payload: dict, db: AsyncSession) -> dict:
     }]
 
     brief_data = await generate_brief(signal_dicts)
-    brief = Brief(
-        date=str(__import__("datetime").date.today()),
-        summary=brief_data["summary"],
-        angle=brief_data["angle"],
-        signal_ids=str(signal.id),
-    )
-    db.add(brief)
-    await db.flush()
+    brief = await dl.save_brief({
+        "date": str(datetime.date.today()),
+        "summary": brief_data["summary"],
+        "angle": brief_data["angle"],
+        "signal_ids": str(signal.get("id", "")),
+    })
 
-    # Generate content for ALL channels — this is the full cascade
+    # Full cascade — all channels
     all_channels = [
         ContentChannel.linkedin,
         ContentChannel.x_thread,
@@ -103,37 +93,37 @@ async def handle_release(payload: dict, db: AsyncSession) -> dict:
         ContentChannel.newsletter,
     ]
 
-    content_items = await generate_all_content(brief_data["summary"], signal_dicts, all_channels)
+    memory = await dl.get_memory_context()
+    content_items = await generate_all_content(brief_data["summary"], signal_dicts, all_channels, memory=memory)
 
     saved = []
     for item in content_items:
         raw = item["body"]
         clean = humanize(raw)
-        content = Content(
-            brief_id=brief.id,
-            signal_id=signal.id,
-            channel=item["channel"],
-            status=ContentStatus.queued,
-            headline=item["headline"],
-            body=clean,
-            body_raw=raw,
-            author="company",
-        )
-        db.add(content)
-        saved.append(content)
+        result = await dl.save_content({
+            "brief_id": brief.get("id"),
+            "signal_id": signal.get("id"),
+            "channel": item["channel"],
+            "status": "queued",
+            "headline": item["headline"],
+            "body": clean,
+            "body_raw": raw,
+            "author": "company",
+        })
+        saved.append(result)
 
-    await db.commit()
+    await dl.commit()
 
     return {
         "status": "cascade_triggered",
         "trigger": f"release:{tag}",
         "repo": repo_name,
         "content_generated": len(saved),
-        "items": [{"channel": c.channel.value, "headline": c.headline} for c in saved],
+        "items": [{"channel": c.get("channel", ""), "headline": c.get("headline", "")} for c in saved],
     }
 
 
-async def handle_push(payload: dict, db: AsyncSession) -> dict:
+async def handle_push(payload: dict, dl: DataLayer) -> dict:
     """GitHub push → save as signal (doesn't trigger full cascade)."""
     repo = payload.get("repository", {}).get("full_name", "unknown")
     commits = payload.get("commits", [])
@@ -143,15 +133,14 @@ async def handle_push(payload: dict, db: AsyncSession) -> dict:
         return {"status": "ignored", "reason": "no commits"}
 
     messages = [c["message"].split("\n")[0] for c in commits[:10]]
-    signal = Signal(
-        type=SignalType.github_commit,
-        source=repo,
-        title=f"{repo} — {len(commits)} commits to {ref.split('/')[-1]}",
-        body="\n".join(f"• {m}" for m in messages),
-        url=payload.get("compare", ""),
-        raw_data=str(commits[:3])[:5000],
-    )
-    db.add(signal)
-    await db.commit()
+    await dl.save_signal({
+        "type": "github_commit",
+        "source": repo,
+        "title": f"{repo} — {len(commits)} commits to {ref.split('/')[-1]}",
+        "body": "\n".join(f"• {m}" for m in messages),
+        "url": payload.get("compare", ""),
+        "raw_data": str(commits[:3])[:5000],
+    })
+    await dl.commit()
 
     return {"status": "signal_saved", "commits": len(commits)}

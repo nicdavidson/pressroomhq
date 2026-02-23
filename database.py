@@ -19,3 +19,11 @@ async def init_db():
 async def get_db():
     async with async_session() as session:
         yield session
+
+
+async def get_data_layer():
+    """FastAPI dependency — yields a DataLayer that routes DF → SQLite."""
+    from services.data_layer import DataLayer
+    async with async_session() as session:
+        dl = DataLayer(session)
+        yield dl

@@ -81,3 +81,12 @@ class Content(Base):
 
     signal = relationship("Signal", back_populates="contents")
     brief = relationship("Brief", back_populates="contents")
+
+
+class Setting(Base):
+    __tablename__ = "settings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key = Column(String(100), unique=True, nullable=False, index=True)
+    value = Column(Text, default="")
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)

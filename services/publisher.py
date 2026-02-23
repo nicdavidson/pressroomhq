@@ -1,90 +1,82 @@
-"""Publisher — Post approved content to destinations via DreamFactory/df-social."""
+"""Publisher — Post approved content via DreamFactory social services.
 
-import httpx
-import datetime
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+Uses DF service discovery to find available social platforms,
+then posts through their standard REST endpoints.
+"""
 
-from config import settings
-from models import Content, ContentStatus, ContentChannel
-
-
-class DFSocialPublisher:
-    """Posts content through DreamFactory's df-social service endpoints."""
-
-    def __init__(self, df_base_url: str = "http://localhost:8080", api_key: str = ""):
-        self.df_base_url = df_base_url.rstrip("/")
-        self.api_key = api_key
-
-    def _headers(self) -> dict:
-        h = {"Content-Type": "application/json"}
-        if self.api_key:
-            h["X-DreamFactory-Api-Key"] = self.api_key
-        return h
-
-    async def publish_to_linkedin(self, text: str, visibility: str = "PUBLIC") -> dict:
-        """Post to LinkedIn via DF df-social endpoint."""
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{self.df_base_url}/api/v2/linkedin/posts",
-                headers=self._headers(),
-                json={"text": text, "visibility": visibility, "author_type": "person"},
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-    async def publish_to_facebook(self, message: str, link: str | None = None) -> dict:
-        """Post to Facebook page via DF df-social endpoint."""
-        payload = {"message": message}
-        if link:
-            payload["link"] = link
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{self.df_base_url}/api/v2/facebook/posts",
-                headers=self._headers(),
-                json=payload,
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-    async def publish(self, content: Content) -> dict:
-        """Route content to the right destination based on channel."""
-        channel = content.channel
-
-        if channel == ContentChannel.linkedin:
-            return await self.publish_to_linkedin(content.body)
-        elif channel == ContentChannel.facebook:
-            return await self.publish_to_facebook(content.body)
-        else:
-            # Channels without live posting yet — mark as published anyway for demo
-            return {"status": "no_destination", "channel": channel.value, "note": "No live publisher configured for this channel"}
+from services.df_client import df
+from services.data_layer import DataLayer
 
 
-async def publish_approved(db: AsyncSession, publisher: DFSocialPublisher | None = None) -> list[dict]:
+# Channel → DF social service type mapping
+CHANNEL_TO_SOCIAL = {
+    "linkedin": "linkedin",
+    "facebook": "facebook",
+    "x_thread": "x_twitter",
+}
+
+
+async def discover_publishers() -> dict[str, str]:
+    """Find available social services via DF. Returns {channel: service_name}."""
+    if not df.available:
+        return {}
+    try:
+        services = await df.discover_social_services()
+        # Map DF service types back to our channels
+        type_to_name = {s.get("type"): s.get("name") for s in services}
+        publishers = {}
+        for channel, social_type in CHANNEL_TO_SOCIAL.items():
+            if social_type in type_to_name:
+                publishers[channel] = type_to_name[social_type]
+        return publishers
+    except Exception:
+        return {}
+
+
+async def publish_single(content: dict, service_name: str) -> dict:
+    """Post a single content item to a DF social service."""
+    channel = content.get("channel", "")
+    payload = {"text": content.get("body", "")}
+
+    # Channel-specific payload shaping
+    if channel == "linkedin":
+        payload = {"text": content["body"], "visibility": "PUBLIC", "author_type": "person"}
+    elif channel == "x_thread":
+        payload = {"text": content["body"], "thread": True}
+    elif channel == "facebook":
+        payload = {"message": content["body"]}
+
+    return await df.social_post(service_name, payload)
+
+
+async def publish_approved(dl: DataLayer) -> list[dict]:
     """Publish all approved content that hasn't been published yet."""
-    if publisher is None:
-        publisher = DFSocialPublisher(
-            df_base_url=getattr(settings, "df_base_url", "http://localhost:8080"),
-            api_key=getattr(settings, "df_api_key", ""),
-        )
+    items = await dl.get_approved_unpublished()
+    if not items:
+        return []
 
-    result = await db.execute(
-        select(Content).where(
-            Content.status == ContentStatus.approved,
-            Content.published_at.is_(None),
-        )
-    )
-    items = result.scalars().all()
+    # Discover which social services are available
+    publishers = await discover_publishers()
+
     results = []
-
     for content in items:
-        try:
-            pub_result = await publisher.publish(content)
-            content.status = ContentStatus.published
-            content.published_at = datetime.datetime.utcnow()
-            results.append({"id": content.id, "channel": content.channel.value, "result": pub_result})
-        except Exception as e:
-            results.append({"id": content.id, "channel": content.channel.value, "error": str(e)})
+        channel = content.get("channel", "")
+        content_id = content.get("id")
 
-    await db.commit()
+        if channel in publishers:
+            try:
+                pub_result = await publish_single(content, publishers[channel])
+                await dl.update_content_status(content_id, "published")
+                results.append({"id": content_id, "channel": channel, "result": pub_result})
+            except Exception as e:
+                results.append({"id": content_id, "channel": channel, "error": str(e)})
+        else:
+            # No live publisher for this channel — mark published anyway for demo
+            await dl.update_content_status(content_id, "published")
+            results.append({
+                "id": content_id, "channel": channel,
+                "result": {"status": "no_destination", "note": f"No DF social service for {channel}"},
+            })
+
+    await dl.commit()
     return results
