@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import Settings from './components/Settings'
+import Voice from './components/Voice'
+import Import from './components/Import'
 
 const API = '/api'
 
@@ -42,7 +44,7 @@ export default function App() {
   const [allContent, setAllContent] = useState([])
   const [time, setTime] = useState(formatTime())
   const [expanded, setExpanded] = useState(null)
-  const [view, setView] = useState('desk') // 'desk' | 'settings'
+  const [view, setView] = useState('desk') // 'desk' | 'voice' | 'import' | 'settings'
 
   // Loading states per action
   const [loading, setLoading] = useState({})
@@ -214,6 +216,8 @@ export default function App() {
           </div>
           <nav className="nav-tabs">
             <button className={`nav-tab ${view === 'desk' ? 'active' : ''}`} onClick={() => setView('desk')}>Desk</button>
+            <button className={`nav-tab ${view === 'voice' ? 'active' : ''}`} onClick={() => setView('voice')}>Voice</button>
+            <button className={`nav-tab ${view === 'import' ? 'active' : ''}`} onClick={() => setView('import')}>Import</button>
             <button className={`nav-tab ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>Config</button>
           </nav>
         </div>
@@ -224,10 +228,12 @@ export default function App() {
       </div>
 
       {/* MAIN LAYOUT */}
-      {view === 'settings' && (
+      {(view === 'settings' || view === 'voice' || view === 'import') && (
         <div className="pressroom" style={{ gridTemplateColumns: '1fr' }}>
           <div className="desk-area" style={{ gridTemplateRows: '1fr 220px' }}>
-            <Settings onLog={log} />
+            {view === 'settings' && <Settings onLog={log} />}
+            {view === 'voice' && <Voice onLog={log} />}
+            {view === 'import' && <Import onLog={log} />}
             {/* ACTIVITY LOG */}
             <div className="log-panel">
               <div className="panel-header">

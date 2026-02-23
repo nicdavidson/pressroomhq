@@ -199,16 +199,6 @@ export default function Settings({ onLog }) {
         <SettingField label="RSS Feeds (JSON array)" k="scout_rss_feeds" getVal={getVal} edit={edit} settings={settings} placeholder='["https://example.com/feed.xml"]' />
       </div>
 
-      {/* VOICE PROFILE */}
-      <div className="settings-section">
-        <div className="section-label">Voice Profile</div>
-        <SettingField label="Persona" k="voice_persona" getVal={getVal} edit={edit} settings={settings} />
-        <SettingField label="Target Audience" k="voice_audience" getVal={getVal} edit={edit} settings={settings} />
-        <SettingField label="Tone" k="voice_tone" getVal={getVal} edit={edit} settings={settings} />
-        <SettingField label="Never Say (JSON array)" k="voice_never_say" getVal={getVal} edit={edit} settings={settings} />
-        <SettingField label="Always" k="voice_always" getVal={getVal} edit={edit} settings={settings} />
-      </div>
-
       {/* ENGINE */}
       <div className="settings-section">
         <div className="section-label">Engine</div>

@@ -25,12 +25,22 @@ DEFAULTS = {
     "scout_hn_keywords": '["DreamFactory", "REST API", "API gateway"]',
     "scout_subreddits": '["selfhosted", "webdev"]',
     "scout_rss_feeds": '[]',
-    # Voice profile
+    # Voice profile — core
     "voice_persona": "Montana-based engineer building real AI infrastructure",
     "voice_audience": "Engineers and technical decision-makers",
     "voice_tone": "Direct, opinionated, no corporate-speak",
-    "voice_never_say": '["excited to share", "game-changer", "leverage", "synergy", "thrilled"]',
+    "voice_never_say": '["excited to share", "game-changer", "leverage", "synergy", "thrilled", "comprehensive", "robust"]',
     "voice_always": "Here's what I built, here's what broke, here's what I learned",
+    "voice_brand_keywords": '["DreamFactory", "REST API", "open source"]',
+    "voice_writing_examples": "",  # paste examples of ideal writing
+    "voice_bio": "",  # one-liner bio for author attribution
+    # Voice profile — per-channel overrides (JSON objects)
+    "voice_linkedin_style": "Professional but not corporate. Hook in first line. No hashtag spam.",
+    "voice_x_style": "Conversational, punchy. Under 280 chars per tweet. No thread emoji.",
+    "voice_blog_style": "Technical depth. Code snippets welcome. No fluff intros.",
+    "voice_email_style": "Plain text feel. One clear CTA. Subject line that gets opened.",
+    "voice_newsletter_style": "Casual, informative. This week format. Community highlights.",
+    "voice_yt_style": "Written for speaking. B-roll markers. 2-4 min read-aloud.",
     # Engine
     "claude_model": "claude-sonnet-4-20250514",
     # Webhook
