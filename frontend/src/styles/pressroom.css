@@ -764,6 +764,40 @@ select.setting-input {
   line-height: 1.5;
 }
 
+/* Golden Anchor Statement */
+.golden-anchor-section {
+  border: 1px solid var(--amber-dim);
+  border-left: 3px solid var(--amber);
+  background: rgba(255, 176, 0, 0.03);
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.golden-anchor-label {
+  color: var(--amber) !important;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.anchor-icon {
+  margin-right: 6px;
+}
+
+.golden-anchor-hint {
+  color: var(--amber-dim) !important;
+  font-style: italic;
+}
+
+.golden-anchor-input {
+  border-color: var(--amber-dim) !important;
+  background: rgba(255, 176, 0, 0.02);
+}
+
+.golden-anchor-input:focus {
+  border-color: var(--amber) !important;
+  box-shadow: 0 0 8px rgba(255, 176, 0, 0.15);
+}
+
 .voice-examples-count {
   font-size: 11px;
   color: var(--amber-dim);

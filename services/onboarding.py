@@ -392,6 +392,7 @@ Return ONLY a valid JSON object (no markdown, no commentary) with these exact fi
 - linkedin_style: string
 - x_style: string
 - blog_style: string
+- golden_anchor: string (the one core message or phrase this company should weave into all content — their north star statement, derived from their messaging)
 - social_profiles: object with keys linkedin, x, facebook, instagram, youtube, github (values are URL strings or null)
 
 IMPORTANT: Escape all special characters in JSON strings. Do not use unescaped quotes or newlines inside string values.
@@ -574,5 +575,7 @@ def profile_to_settings(profile: dict) -> dict:
         mapping["voice_x_style"] = profile["x_style"]
     if profile.get("blog_style"):
         mapping["voice_blog_style"] = profile["blog_style"]
+    if profile.get("golden_anchor"):
+        mapping["golden_anchor"] = profile["golden_anchor"]
 
     return mapping

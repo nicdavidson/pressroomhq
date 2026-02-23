@@ -380,6 +380,7 @@ export default function Onboard({ onLog, onComplete }) {
             <div className="onboard-profile">
               <ProfileField label="Company Name" value={profile.company_name || ''} onChange={v => editProfile('company_name', v)} />
               <ProfileField label="Industry" value={profile.industry || ''} onChange={v => editProfile('industry', v)} />
+              <ProfileField label="Golden Anchor Statement" value={profile.golden_anchor || ''} onChange={v => editProfile('golden_anchor', v)} textarea placeholder="Your company's north star message — woven into all content" />
               <ProfileField label="Persona" value={profile.persona || ''} onChange={v => editProfile('persona', v)} textarea />
               <ProfileField label="Bio (one-liner)" value={profile.bio || ''} onChange={v => editProfile('bio', v)} />
               <ProfileField label="Target Audience" value={profile.audience || ''} onChange={v => editProfile('audience', v)} />

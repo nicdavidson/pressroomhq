@@ -90,6 +90,23 @@ export default function Voice({ onLog, orgId }) {
         </button>
       </div>
 
+      {/* GOLDEN ANCHOR */}
+      <div className="settings-section golden-anchor-section">
+        <div className="section-label golden-anchor-label">
+          <span className="anchor-icon">⚓</span> Golden Anchor Statement
+        </div>
+        <p className="voice-hint golden-anchor-hint">
+          The core message or phrase to weave into all content. This is your company's north star.
+        </p>
+        <textarea
+          className="setting-input voice-textarea golden-anchor-input"
+          value={getVal('golden_anchor')}
+          onChange={e => edit('golden_anchor', e.target.value)}
+          placeholder="e.g. Every business deserves enterprise-grade APIs without enterprise-grade complexity."
+          rows={3}
+        />
+      </div>
+
       {/* CORE IDENTITY */}
       <div className="settings-section">
         <div className="section-label">Identity</div>

@@ -201,6 +201,14 @@ Never trash competitors. Position through strength, not comparison."""
     except (json.JSONDecodeError, TypeError):
         pass
 
+    # Golden anchor statement
+    golden_anchor = v.get("golden_anchor", "")
+    anchor_block = ""
+    if golden_anchor and golden_anchor.strip():
+        anchor_block = f"""\
+
+GOLDEN ANCHOR: The following statement is this company's north star message. Weave it into the content naturally when relevant: '{golden_anchor}'"""
+
     asset_block = ""
     if assets:
         asset_block = "\n\n" + _build_asset_map_block(assets)
@@ -212,7 +220,7 @@ Your tone: {tone}
 
 You're writing a {channel_config['headline_prefix']} post based on today's intelligence signals.{style_line}
 
-{voice_block}{comp_block}{asset_block}
+{voice_block}{comp_block}{anchor_block}{asset_block}
 
 CONTENT RULES FOR {channel_config['headline_prefix']}:
 {channel_config['rules']}
