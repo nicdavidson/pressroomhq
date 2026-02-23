@@ -11,6 +11,8 @@ from database import init_db
 from api.signals import router as signals_router
 from api.content import router as content_router
 from api.pipeline import router as pipeline_router
+from api.webhook import router as webhook_router
+from api.publish import router as publish_router
 
 
 @asynccontextmanager
@@ -37,6 +39,8 @@ app.add_middleware(
 app.include_router(signals_router)
 app.include_router(content_router)
 app.include_router(pipeline_router)
+app.include_router(webhook_router)
+app.include_router(publish_router)
 
 # Serve frontend static files if built
 frontend_dist = Path(__file__).parent / "frontend" / "dist"

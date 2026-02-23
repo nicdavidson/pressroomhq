@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     scout_subreddits: list[str] = ["selfhosted", "webdev"]
     scout_rss_feeds: list[str] = []
     claude_model: str = "claude-sonnet-4-20250514"
+    df_base_url: str = "http://localhost:8080"
+    df_api_key: str = ""
+    github_webhook_secret: str = ""
 
     class Config:
         env_file = ".env"

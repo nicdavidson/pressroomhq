@@ -126,8 +126,21 @@ export default function App() {
     }
   }
 
+  const runPublish = async () => {
+    setStatus('publishing')
+    try {
+      const res = await fetch(`${API}/publish`, { method: 'POST' })
+      const data = await res.json()
+      setStatus(`published ${data.published}, ${data.errors} errors`)
+      refresh()
+    } catch (e) {
+      setStatus('publish failed')
+    }
+  }
+
   const queuedCount = queue.length
   const approvedCount = allContent.filter(c => c.status === 'approved').length
+  const publishedCount = allContent.filter(c => c.status === 'published').length
 
   return (
     <>
@@ -172,8 +185,9 @@ export default function App() {
             <button className="btn btn-run" onClick={runScout}>Scout</button>
             <button className="btn btn-run" onClick={runGenerate}>Generate</button>
             <button className="btn btn-run" onClick={runFull}>Full Run</button>
+            <button className="btn btn-approve" onClick={runPublish} disabled={approvedCount === 0}>Publish</button>
             <span style={{ marginLeft: 'auto', color: 'var(--text-dim)', fontSize: 12, alignSelf: 'center' }}>
-              {queuedCount} queued &middot; {approvedCount} approved
+              {queuedCount} queued &middot; {approvedCount} approved &middot; {publishedCount} published
             </span>
           </div>
 
@@ -215,7 +229,10 @@ export default function App() {
                     </>
                   )}
                   {c.status === 'approved' && (
-                    <span style={{ color: 'var(--green)', fontSize: 11 }}>✓ APPROVED</span>
+                    <span style={{ color: 'var(--green)', fontSize: 11 }}>✓ APPROVED — awaiting publish</span>
+                  )}
+                  {c.status === 'published' && (
+                    <span style={{ color: 'var(--green)', fontSize: 11 }}>✓✓ PUBLISHED</span>
                   )}
                   {c.status === 'spiked' && (
                     <span style={{ color: 'var(--red)', fontSize: 11 }}>✗ SPIKED</span>
