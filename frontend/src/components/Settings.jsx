@@ -202,7 +202,8 @@ export default function Settings({ onLog }) {
       {/* ENGINE */}
       <div className="settings-section">
         <div className="section-label">Engine</div>
-        <SettingField label="Claude Model" k="claude_model" getVal={getVal} edit={edit} settings={settings} />
+        <SettingField label="Claude Model (content)" k="claude_model" getVal={getVal} edit={edit} settings={settings} placeholder="claude-sonnet-4-6" />
+        <SettingField label="Claude Model (fast/analysis)" k="claude_model_fast" getVal={getVal} edit={edit} settings={settings} placeholder="claude-haiku-4-5-20251001" />
         <SettingField label="GitHub Webhook Secret" k="github_webhook_secret" type="password" getVal={getVal} edit={edit} settings={settings} />
       </div>
     </div>

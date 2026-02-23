@@ -248,7 +248,7 @@ async def generate_brief(signals: list[dict], memory: dict | None = None,
     voice_block = _build_voice_block(voice_settings)
 
     response = _get_client().messages.create(
-        model=settings.claude_model,
+        model=settings.claude_model_fast,
         max_tokens=1000,
         system=f"""You are the wire editor at a content operations platform. You receive the day's signals — releases, trends, community posts, support patterns — and synthesize them into a daily brief.
 

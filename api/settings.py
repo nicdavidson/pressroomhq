@@ -42,7 +42,8 @@ DEFAULTS = {
     "voice_newsletter_style": "Casual, informative. This week format. Community highlights.",
     "voice_yt_style": "Written for speaking. B-roll markers. 2-4 min read-aloud.",
     # Engine
-    "claude_model": "claude-sonnet-4-20250514",
+    "claude_model": "claude-sonnet-4-6",
+    "claude_model_fast": "claude-haiku-4-5-20251001",
     # Webhook
     "github_webhook_secret": "",
     # Onboarding metadata
@@ -241,6 +242,8 @@ async def _sync_to_runtime(db: AsyncSession):
         cfg.df_api_key = stored["df_api_key"]
     if stored.get("claude_model"):
         cfg.claude_model = stored["claude_model"]
+    if stored.get("claude_model_fast"):
+        cfg.claude_model_fast = stored["claude_model_fast"]
     if stored.get("github_webhook_secret"):
         cfg.github_webhook_secret = stored["github_webhook_secret"]
 

@@ -112,7 +112,7 @@ Return a JSON object with these exact fields:
 Be specific to THIS company. Not generic marketing advice. Derive everything from what you actually see on their site."""
 
     response = _get_client().messages.create(
-        model=settings.claude_model,
+        model=settings.claude_model_fast,
         max_tokens=2000,
         system="You are a content strategist analyzing a company to set up their AI content engine. Return valid JSON only.",
         messages=[{"role": "user", "content": prompt}],
@@ -187,7 +187,7 @@ Return a JSON object:
 }}"""
 
     response = _get_client().messages.create(
-        model=settings.claude_model,
+        model=settings.claude_model_fast,
         max_tokens=2000,
         system="You are a data architect classifying connected services for an AI content platform. Return valid JSON only. Be specific about what each service provides.",
         messages=[{"role": "user", "content": prompt}],
