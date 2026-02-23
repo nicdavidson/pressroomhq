@@ -71,9 +71,9 @@ def _repair_json(text: str) -> dict | None:
     return None
 
 
-def _get_client():
-    """Lazy client — picks up the API key at call time, not import time."""
-    return anthropic.Anthropic(api_key=settings.anthropic_api_key)
+def _get_client(api_key: str | None = None):
+    """Lazy client — uses explicit key if provided, else runtime config."""
+    return anthropic.Anthropic(api_key=api_key or settings.anthropic_api_key)
 
 
 # ──────────────────────────────────────
@@ -162,6 +162,24 @@ def _label_url(url: str, base: str) -> str | None:
     return None
 
 
+def _prefer_url(new_url: str, existing_url: str) -> bool:
+    """Should new_url replace existing_url for the same label?
+
+    Prefers root/shorter paths over deep links. e.g. blog.example.com
+    beats blog.example.com/some-article-title.
+    """
+    from urllib.parse import urlparse
+    new_path = urlparse(new_url).path.strip("/")
+    old_path = urlparse(existing_url).path.strip("/")
+    # Root URL always wins
+    if not new_path and old_path:
+        return True
+    # Shorter path wins (fewer segments = closer to root)
+    if new_path.count("/") < old_path.count("/"):
+        return True
+    return False
+
+
 async def _discover_from_sitemap(client: httpx.AsyncClient, base: str) -> dict[str, str]:
     """Try sitemap.xml → return {label: url} for interesting pages."""
     from urllib.parse import urlparse
@@ -190,7 +208,7 @@ async def _discover_from_sitemap(client: httpx.AsyncClient, base: str) -> dict[s
                                 if not _is_same_org(su_host, base_host):
                                     continue
                                 label = _label_url(su, base)
-                                if label and label not in discovered:
+                                if label and (label not in discovered or _prefer_url(su, discovered[label])):
                                     discovered[label] = su
                     except Exception:
                         pass
@@ -200,7 +218,7 @@ async def _discover_from_sitemap(client: httpx.AsyncClient, base: str) -> dict[s
                 if url_host and not _is_same_org(url_host, base_host):
                     continue
                 label = _label_url(url, base)
-                if label and label not in discovered:
+                if label and (label not in discovered or _prefer_url(url, discovered[label])):
                     discovered[label] = url
             if discovered:
                 break
@@ -227,7 +245,7 @@ async def _discover_from_nav(client: httpx.AsyncClient, base: str, homepage_html
             continue
 
         label = _label_url(url, base)
-        if label and label not in discovered:
+        if label and (label not in discovered or _prefer_url(url, discovered[label])):
             discovered[label] = url
 
     return discovered
@@ -334,7 +352,8 @@ def _extract_text(html: str) -> str:
 # Profile Synthesis
 # ──────────────────────────────────────
 
-async def synthesize_profile(crawl_data: dict, extra_context: str = "") -> dict:
+async def synthesize_profile(crawl_data: dict, extra_context: str = "",
+                              api_key: str | None = None) -> dict:
     """Claude synthesizes a company profile from crawled page data."""
     pages_text = ""
     for label, page in crawl_data.get("pages", {}).items():
@@ -379,7 +398,7 @@ IMPORTANT: Escape all special characters in JSON strings. Do not use unescaped q
 
 Be specific to THIS company. Not generic marketing advice. Derive everything from what you actually see on their site."""
 
-    response = _get_client().messages.create(
+    response = _get_client(api_key).messages.create(
         model=settings.claude_model_fast,
         max_tokens=4000,
         system="You are a content strategist analyzing a company to set up their AI content engine. Return valid JSON only, no markdown fences.",
@@ -401,7 +420,7 @@ Be specific to THIS company. Not generic marketing advice. Derive everything fro
 # Scout Source Generation
 # ──────────────────────────────────────
 
-async def generate_scout_sources(profile: dict) -> dict:
+async def generate_scout_sources(profile: dict, api_key: str | None = None) -> dict:
     """Claude generates relevant scout sources from a company profile.
 
     Returns subreddits, HN keywords, GitHub repos, and RSS feeds
@@ -433,7 +452,7 @@ Return ONLY a valid JSON object with:
 
 Be SPECIFIC to this company. A DreamFactory (API platform) company should NOT get r/homelab. An e-commerce company should NOT get r/webdev. Think about WHO their customers are and WHERE those people talk."""
 
-    response = _get_client().messages.create(
+    response = _get_client(api_key).messages.create(
         model=settings.claude_model_fast,
         max_tokens=1500,
         system="You are a content strategist. Return valid JSON only, no markdown fences.",
@@ -455,7 +474,8 @@ Be SPECIFIC to this company. A DreamFactory (API platform) company should NOT ge
 # DF Service Classification
 # ──────────────────────────────────────
 
-async def classify_df_services(db_services: list[dict], social_services: list[dict]) -> dict:
+async def classify_df_services(db_services: list[dict], social_services: list[dict],
+                                api_key: str | None = None) -> dict:
     """Claude classifies discovered DF services by role for the content engine.
 
     Takes introspected DB services (with schemas/samples) and social services,
@@ -508,7 +528,7 @@ Return a JSON object:
   "publishing_channels": ["service names for publishing content"]
 }}"""
 
-    response = _get_client().messages.create(
+    response = _get_client(api_key).messages.create(
         model=settings.claude_model_fast,
         max_tokens=2000,
         system="You are a data architect classifying connected services for an AI content platform. Return valid JSON only. Be specific about what each service provides.",

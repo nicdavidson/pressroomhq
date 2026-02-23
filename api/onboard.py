@@ -56,7 +56,7 @@ async def onboard_crawl(req: CrawlRequest):
 
 
 @router.post("/profile")
-async def onboard_profile(req: ProfileRequest):
+async def onboard_profile(req: ProfileRequest, dl: DataLayer = Depends(get_data_layer)):
     """Step 2: Synthesize a company profile from crawl data.
 
     If crawl_data not provided, crawls the domain first.
@@ -69,7 +69,8 @@ async def onboard_profile(req: ProfileRequest):
         return {"error": "Need crawl_data or domain"}
 
     try:
-        profile = await synthesize_profile(crawl_data, req.extra_context)
+        api_key = await dl.resolve_api_key()
+        profile = await synthesize_profile(crawl_data, req.extra_context, api_key=api_key)
     except anthropic.AuthenticationError:
         return JSONResponse(status_code=401, content={
             "error": "Invalid Anthropic API key. Check your key in Settings and try again."
@@ -83,7 +84,7 @@ async def onboard_profile(req: ProfileRequest):
 
 
 @router.post("/df-classify")
-async def onboard_df_classify():
+async def onboard_df_classify(dl: DataLayer = Depends(get_data_layer)):
     """Step 3: Discover DF services, introspect schemas, classify with Claude.
 
     Requires DF to be connected (df_base_url + df_api_key in settings).
@@ -92,6 +93,7 @@ async def onboard_df_classify():
         return {"available": False, "error": "DreamFactory not configured. Set df_base_url and df_api_key first."}
 
     try:
+        api_key = await dl.resolve_api_key()
         db_services = await df.introspect_all_db_services()
 
         social_services = await df.discover_social_services()
@@ -101,7 +103,7 @@ async def onboard_df_classify():
             except Exception:
                 svc["auth_status"] = {"connected": False}
 
-        classification = await classify_df_services(db_services, social_services)
+        classification = await classify_df_services(db_services, social_services, api_key=api_key)
 
         return {
             "available": True,
@@ -164,8 +166,9 @@ async def onboard_apply(req: ApplyProfileRequest, dl: DataLayer = Depends(get_da
         applied.append("df_service_map")
 
     # Generate smart scout sources from the profile
+    api_key = await dl.resolve_api_key()
     try:
-        scout_sources = await generate_scout_sources(req.profile)
+        scout_sources = await generate_scout_sources(req.profile, api_key=api_key)
         if scout_sources:
             if scout_sources.get("subreddits"):
                 await dl.set_setting("scout_subreddits", json.dumps(scout_sources["subreddits"]))

@@ -18,9 +18,9 @@ from models import ContentChannel
 log = logging.getLogger("pressroom")
 
 
-def _get_client():
-    """Lazy client — picks up the API key at call time, not import time."""
-    return anthropic.Anthropic(api_key=settings.anthropic_api_key)
+def _get_client(api_key: str | None = None):
+    """Lazy client — uses explicit key if provided, else runtime config."""
+    return anthropic.Anthropic(api_key=api_key or settings.anthropic_api_key)
 
 # Fallback voice if no settings configured
 DEFAULT_VOICE = {
@@ -365,7 +365,8 @@ def _rank_signals_for_channel(signals: list[dict], channel: ContentChannel) -> l
 
 
 async def generate_brief(signals: list[dict], memory: dict | None = None,
-                          voice_settings: dict | None = None) -> dict:
+                          voice_settings: dict | None = None,
+                          api_key: str | None = None) -> dict:
     """Synthesize signals into a structured content plan with per-channel recommendations."""
     signal_text = "\n\n".join(
         f"[{i+1}] [{s.get('type', 'unknown')}] {s.get('source', '')} — {s.get('title', '')}\n{s.get('body', '')[:500]}"
@@ -388,7 +389,7 @@ async def generate_brief(signals: list[dict], memory: dict | None = None,
             if recent_headlines:
                 recent_block = "\n\nRECENT CONTENT (avoid these topics — find fresh angles):\n" + "\n".join(f"  - {h}" for h in recent_headlines)
 
-    response = _get_client().messages.create(
+    response = _get_client(api_key).messages.create(
         model=settings.claude_model_fast,
         max_tokens=1500,
         system=f"""You are the editorial director at {company}. You receive today's intelligence signals and decide what content to produce.
@@ -434,7 +435,8 @@ NEWSLETTER: Weekly roundup angle if applicable, or "SKIP".""",
 async def generate_content(brief: dict, signals: list[dict], channel: ContentChannel,
                            memory: dict | None = None,
                            voice_settings: dict | None = None,
-                           assets: list[dict] | None = None) -> dict:
+                           assets: list[dict] | None = None,
+                           api_key: str | None = None) -> dict:
     """Generate content for a specific channel with targeted signals and channel-specific angle."""
     channel_config = CHANNEL_RULES.get(channel)
     if not channel_config:
@@ -461,7 +463,7 @@ async def generate_content(brief: dict, signals: list[dict], channel: ContentCha
     channel_angle = brief.get("channel_angles", {}).get(channel.value, "")
     angle_line = f"\n\nEDITORIAL DIRECTION for this piece: {channel_angle}" if channel_angle else ""
 
-    response = _get_client().messages.create(
+    response = _get_client(api_key).messages.create(
         model=settings.claude_model,
         max_tokens=2000,
         system=system_prompt,
@@ -516,7 +518,8 @@ async def generate_all_content(brief: dict, signals: list[dict],
                                 channels: list[ContentChannel] | None = None,
                                 memory: dict | None = None,
                                 voice_settings: dict | None = None,
-                                assets: list[dict] | None = None) -> list[dict]:
+                                assets: list[dict] | None = None,
+                                api_key: str | None = None) -> list[dict]:
     """Generate content across all channels (or specified subset).
     Each channel gets its own signal selection and editorial angle."""
     target_channels = channels or [
@@ -541,7 +544,7 @@ async def generate_all_content(brief: dict, signals: list[dict],
 
     results = []
     for channel in target_channels:
-        result = await generate_content(brief, signals, channel, memory=memory, voice_settings=voice_settings, assets=assets)
+        result = await generate_content(brief, signals, channel, memory=memory, voice_settings=voice_settings, assets=assets, api_key=api_key)
         results.append(result)
 
     return results
@@ -550,7 +553,8 @@ async def generate_all_content(brief: dict, signals: list[dict],
 async def regenerate_single(content_body: str, channel: ContentChannel,
                              feedback: str = "",
                              memory: dict | None = None,
-                             voice_settings: dict | None = None) -> dict:
+                             voice_settings: dict | None = None,
+                             api_key: str | None = None) -> dict:
     """Regenerate a single piece of content with optional editor feedback."""
     channel_config = CHANNEL_RULES.get(channel)
     if not channel_config:
@@ -560,7 +564,7 @@ async def regenerate_single(content_body: str, channel: ContentChannel,
 
     feedback_line = f"\n\nEDITOR FEEDBACK: {feedback}\nRewrite to address this feedback." if feedback else "\nRewrite this piece with a fresh angle. Same topic, different approach."
 
-    response = _get_client().messages.create(
+    response = _get_client(api_key).messages.create(
         model=settings.claude_model,
         max_tokens=2000,
         system=system_prompt,
@@ -582,7 +586,8 @@ async def regenerate_single(content_body: str, channel: ContentChannel,
 
 # ─── Story-based generation ─────────────────────────────
 
-async def generate_from_story(story: dict, dl, channels: list[str] | None = None) -> list[dict]:
+async def generate_from_story(story: dict, dl, channels: list[str] | None = None,
+                               api_key: str | None = None) -> list[dict]:
     """Generate content from a curated story — editorial context + curated signals.
 
     Reuses the existing generate_content pipeline by packing the story's
@@ -632,6 +637,7 @@ async def generate_from_story(story: dict, dl, channels: list[str] | None = None
     content_items = await generate_all_content(
         synthetic_brief, signal_dicts, target_channels,
         memory=memory, voice_settings=voice, assets=assets,
+        api_key=api_key,
     )
 
     saved = []
@@ -654,7 +660,7 @@ async def generate_from_story(story: dict, dl, channels: list[str] | None = None
     return saved
 
 
-async def dig_deeper_signal(signal: dict, dl) -> dict:
+async def dig_deeper_signal(signal: dict, dl, api_key: str | None = None) -> dict:
     """Fetch a signal's source URL, extract content, summarize key facts with Claude."""
     url = signal.get("url", "")
     if not url:
@@ -670,7 +676,7 @@ async def dig_deeper_signal(signal: dict, dl) -> dict:
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()[:8000]
 
-    response = _get_client().messages.create(
+    response = _get_client(api_key).messages.create(
         model=settings.claude_model_fast,
         max_tokens=1500,
         system="You are a research analyst extracting key facts from a web page for editorial use. Be specific — pull exact quotes, numbers, data points, and key claims.",

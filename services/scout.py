@@ -302,7 +302,8 @@ def _parse_json_list(raw: str, default: list) -> list:
 # Relevance Filter
 # ──────────────────────────────────────
 
-async def filter_signals_for_relevance(signals: list[dict], company_context: str) -> list[dict]:
+async def filter_signals_for_relevance(signals: list[dict], company_context: str,
+                                       api_key: str | None = None) -> list[dict]:
     """Use Claude to score signals for relevance to this company. Discard junk."""
     if not signals or len(signals) <= 3:
         return signals  # not worth filtering tiny batches
@@ -336,7 +337,7 @@ Rules:
 - Be strict. Quality over quantity."""
 
     try:
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        client = anthropic.Anthropic(api_key=api_key or settings.anthropic_api_key)
         response = client.messages.create(
             model=settings.claude_model_fast,
             max_tokens=1500,

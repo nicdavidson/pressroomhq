@@ -56,6 +56,7 @@ class Organization(Base):
     data_sources = relationship("DataSource", back_populates="org", cascade="all, delete-orphan")
     assets = relationship("CompanyAsset", back_populates="org", cascade="all, delete-orphan")
     stories = relationship("Story", back_populates="org", cascade="all, delete-orphan")
+    audits = relationship("AuditResult", back_populates="org", cascade="all, delete-orphan")
 
 
 class Signal(Base):
@@ -180,6 +181,32 @@ class StorySignal(Base):
 
     story = relationship("Story", back_populates="story_signals")
     signal = relationship("Signal")
+
+
+class ApiKey(Base):
+    """Labeled Anthropic API key — account-level, assigned to orgs for usage tracking."""
+    __tablename__ = "api_keys"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    label = Column(String(255), nullable=False)
+    key_value = Column(String(500), nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class AuditResult(Base):
+    """Persisted audit result — SEO or README."""
+    __tablename__ = "audit_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    audit_type = Column(String(50), nullable=False)  # seo, readme
+    target = Column(String(1000), nullable=False)     # domain URL or owner/repo
+    score = Column(Integer, default=0)
+    total_issues = Column(Integer, default=0)
+    result_json = Column(Text, default="{}")           # full audit result
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    org = relationship("Organization", back_populates="audits")
 
 
 class Setting(Base):

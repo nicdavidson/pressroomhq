@@ -144,7 +144,8 @@ async def generate_from_story(story_id: int, req: GenerateRequest,
     await dl.commit()
 
     try:
-        results = await engine_generate(story, dl, channels=req.channels or None)
+        api_key = await dl.resolve_api_key()
+        results = await engine_generate(story, dl, channels=req.channels or None, api_key=api_key)
         await dl.update_story(story_id, status="complete")
         await dl.commit()
         return {"story_id": story_id, "generated": len(results), "content": results}

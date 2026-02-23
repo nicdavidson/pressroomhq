@@ -42,16 +42,26 @@ def _build_company_context(voice: dict) -> str:
 @router.post("/scout")
 async def trigger_scout(since_hours: int = 24, dl: DataLayer = Depends(get_data_layer)):
     """Run the scout — pull signals from all sources."""
+    api_key = await dl.resolve_api_key()
     org_settings = await dl.get_all_settings()
     raw_signals = await run_full_scout(since_hours, org_settings=org_settings)
 
     # Relevance filter — discard off-topic noise
     voice = await dl.get_voice_settings()
     company_ctx = _build_company_context(voice)
-    signals = await filter_signals_for_relevance(raw_signals, company_ctx)
+    signals = await filter_signals_for_relevance(raw_signals, company_ctx, api_key=api_key)
 
+    # Prune signals older than 7 days
+    pruned = await dl.prune_old_signals(days=7)
+
+    # Save with URL dedup — skip signals we already have
     saved = []
+    skipped = 0
     for s in signals:
+        url = s.get("url", "")
+        if url and await dl.signal_exists(url):
+            skipped += 1
+            continue
         result = await dl.save_signal(s)
         saved.append(result)
 
@@ -60,6 +70,8 @@ async def trigger_scout(since_hours: int = 24, dl: DataLayer = Depends(get_data_
         "signals_raw": len(raw_signals),
         "signals_relevant": len(signals),
         "signals_saved": len(saved),
+        "signals_skipped_dupes": skipped,
+        "signals_pruned": pruned,
         "signals": [{"title": s.get("title", ""), "type": s.get("type", ""), "source": s.get("source", "")} for s in saved],
     }
 
@@ -79,8 +91,11 @@ async def trigger_generate(
     voice = await dl.get_voice_settings()
     memory = await dl.get_memory_context()
 
+    # Resolve API key for this org
+    api_key = await dl.resolve_api_key()
+
     # Generate structured brief with per-channel angles
-    brief_data = await generate_brief(signal_dicts, memory=memory, voice_settings=voice)
+    brief_data = await generate_brief(signal_dicts, memory=memory, voice_settings=voice, api_key=api_key)
     brief = await dl.save_brief({
         "date": str(datetime.date.today()),
         "summary": brief_data["summary"],
@@ -100,6 +115,7 @@ async def trigger_generate(
     content_items = await generate_all_content(
         brief_data, signal_dicts, target_channels,
         memory=memory, voice_settings=voice, assets=assets,
+        api_key=api_key,
     )
 
     saved_content = []
@@ -141,6 +157,7 @@ async def regenerate_content(content_id: int, req: RegenerateRequest,
     channel = ContentChannel(existing["channel"])
     voice = await dl.get_voice_settings()
     memory = await dl.get_memory_context()
+    api_key = await dl.resolve_api_key()
 
     # Use the raw (pre-humanizer) body as source, fall back to cleaned body
     source_body = existing.get("body_raw", "") or existing.get("body", "")
@@ -149,6 +166,7 @@ async def regenerate_content(content_id: int, req: RegenerateRequest,
         source_body, channel,
         feedback=req.feedback,
         memory=memory, voice_settings=voice,
+        api_key=api_key,
     )
 
     # Humanize and update the content record
@@ -172,16 +190,23 @@ async def regenerate_content(content_id: int, req: RegenerateRequest,
 @router.post("/run")
 async def full_run(since_hours: int = 24, dl: DataLayer = Depends(get_data_layer)):
     """Full pipeline: scout → brief → generate → humanize → queue."""
+    api_key = await dl.resolve_api_key()
     org_settings = await dl.get_all_settings()
     raw_signals = await run_full_scout(since_hours, org_settings=org_settings)
 
     # Relevance filter — discard off-topic noise before generating content
     voice = await dl.get_voice_settings()
     company_ctx = _build_company_context(voice)
-    filtered_signals = await filter_signals_for_relevance(raw_signals, company_ctx)
+    filtered_signals = await filter_signals_for_relevance(raw_signals, company_ctx, api_key=api_key)
+
+    # Prune old signals + dedup
+    await dl.prune_old_signals(days=7)
 
     saved_signals = []
     for s in filtered_signals:
+        url = s.get("url", "")
+        if url and await dl.signal_exists(url):
+            continue
         result = await dl.save_signal(s)
         saved_signals.append(result)
 
@@ -196,7 +221,7 @@ async def full_run(since_hours: int = 24, dl: DataLayer = Depends(get_data_layer
     memory = await dl.get_memory_context()
 
     # Structured brief with per-channel angles
-    brief_data = await generate_brief(signal_dicts, memory=memory, voice_settings=voice)
+    brief_data = await generate_brief(signal_dicts, memory=memory, voice_settings=voice, api_key=api_key)
     brief = await dl.save_brief({
         "date": str(datetime.date.today()),
         "summary": brief_data["summary"],
@@ -211,6 +236,7 @@ async def full_run(since_hours: int = 24, dl: DataLayer = Depends(get_data_layer
     content_items = await generate_all_content(
         brief_data, signal_dicts,
         memory=memory, voice_settings=voice, assets=assets,
+        api_key=api_key,
     )
 
     saved_content = []

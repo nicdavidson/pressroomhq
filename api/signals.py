@@ -52,7 +52,8 @@ async def dig_deeper(signal_id: int, dl: DataLayer = Depends(get_data_layer)):
 
     try:
         from services.engine import dig_deeper_signal
-        updated = await dig_deeper_signal(signal, dl)
+        api_key = await dl.resolve_api_key()
+        updated = await dig_deeper_signal(signal, dl, api_key=api_key)
         return updated
     except Exception as e:
         log.error("Dig deeper failed (signal=%s): %s", signal_id, e)

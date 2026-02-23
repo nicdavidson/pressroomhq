@@ -60,6 +60,8 @@ DEFAULTS = {
     "facebook_page_name": "",
     # Webhook
     "github_webhook_secret": "",
+    # Per-org API key assignment (references api_keys.id)
+    "anthropic_api_key_id": "",
     # Onboarding metadata
     "onboard_company_name": "",
     "onboard_industry": "",
@@ -242,6 +244,43 @@ async def df_services():
         }
     except Exception as e:
         return {"available": False, "error": str(e), "services": [], "social": [], "databases": []}
+
+
+# ── API Key Management ──
+
+class ApiKeyCreate(BaseModel):
+    label: str
+    key_value: str
+
+class ApiKeyUpdateLabel(BaseModel):
+    label: str
+
+@router.get("/api-keys")
+async def list_api_keys(dl: DataLayer = Depends(get_data_layer)):
+    """List all labeled API keys (values masked)."""
+    return await dl.list_api_keys()
+
+@router.post("/api-keys")
+async def create_api_key(req: ApiKeyCreate, dl: DataLayer = Depends(get_data_layer)):
+    result = await dl.create_api_key(req.label, req.key_value)
+    await dl.commit()
+    return result
+
+@router.put("/api-keys/{key_id}")
+async def update_api_key(key_id: int, req: ApiKeyUpdateLabel, dl: DataLayer = Depends(get_data_layer)):
+    result = await dl.update_api_key_label(key_id, req.label)
+    if not result:
+        return {"error": "Key not found"}
+    await dl.commit()
+    return result
+
+@router.delete("/api-keys/{key_id}")
+async def delete_api_key(key_id: int, dl: DataLayer = Depends(get_data_layer)):
+    deleted = await dl.delete_api_key(key_id)
+    if not deleted:
+        return {"error": "Key not found"}
+    await dl.commit()
+    return {"deleted": key_id}
 
 
 async def _sync_to_runtime(dl: DataLayer):

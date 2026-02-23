@@ -12,7 +12,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import (Signal, Brief, Content, Setting, Organization, DataSource,
-                    CompanyAsset, Story, StorySignal,
+                    CompanyAsset, Story, StorySignal, ApiKey, AuditResult,
                     SignalType, ContentChannel, ContentStatus, StoryStatus)
 from services.df_client import df
 
@@ -167,6 +167,26 @@ class DataLayer:
                  "body": s.body, "url": s.url, "prioritized": s.prioritized or 0,
                  "created_at": s.created_at.isoformat() if s.created_at else None}
                 for s in result.scalars().all()]
+
+    async def signal_exists(self, url: str) -> bool:
+        """Check if a signal with this URL already exists for this org."""
+        if not url:
+            return False
+        query = select(Signal.id).where(Signal.url == url).limit(1)
+        if self.org_id:
+            query = query.where(Signal.org_id == self.org_id)
+        result = await self.db.execute(query)
+        return result.scalar_one_or_none() is not None
+
+    async def prune_old_signals(self, days: int = 7) -> int:
+        """Delete signals older than N days. Returns count deleted."""
+        from sqlalchemy import delete as sql_delete
+        cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+        stmt = sql_delete(Signal).where(Signal.created_at < cutoff)
+        if self.org_id:
+            stmt = stmt.where(Signal.org_id == self.org_id)
+        result = await self.db.execute(stmt)
+        return result.rowcount
 
     # ──────────────────────────────────────
     # Briefs
@@ -731,6 +751,115 @@ class DataLayer:
         return {"id": s.id, "type": s.type.value, "source": s.source, "title": s.title,
                 "body": s.body, "url": s.url, "prioritized": s.prioritized or 0}
 
+    # ── API Keys (account-level) ──
+
+    async def list_api_keys(self) -> list[dict]:
+        result = await self.db.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
+        return [{"id": k.id, "label": k.label,
+                 "key_preview": k.key_value[:8] + "..." if len(k.key_value) > 8 else "***",
+                 "created_at": k.created_at.isoformat() if k.created_at else None}
+                for k in result.scalars().all()]
+
+    async def create_api_key(self, label: str, key_value: str) -> dict:
+        k = ApiKey(label=label, key_value=key_value)
+        self.db.add(k)
+        await self.db.flush()
+        return {"id": k.id, "label": k.label,
+                "key_preview": k.key_value[:8] + "...",
+                "created_at": k.created_at.isoformat() if k.created_at else None}
+
+    async def update_api_key_label(self, key_id: int, label: str) -> dict | None:
+        result = await self.db.execute(select(ApiKey).where(ApiKey.id == key_id))
+        k = result.scalar_one_or_none()
+        if not k:
+            return None
+        k.label = label
+        await self.db.flush()
+        return {"id": k.id, "label": k.label, "key_preview": k.key_value[:8] + "..."}
+
+    async def delete_api_key(self, key_id: int) -> bool:
+        result = await self.db.execute(select(ApiKey).where(ApiKey.id == key_id))
+        k = result.scalar_one_or_none()
+        if not k:
+            return False
+        await self.db.delete(k)
+        return True
+
+    async def get_api_key_value(self, key_id: int) -> str | None:
+        result = await self.db.execute(select(ApiKey).where(ApiKey.id == key_id))
+        k = result.scalar_one_or_none()
+        return k.key_value if k else None
+
+    async def resolve_api_key(self) -> str | None:
+        """Resolve the Anthropic API key for the current org.
+
+        Priority: org's assigned key → first key in table → legacy global config.
+        """
+        from config import settings as cfg
+
+        # 1. Org's assigned key
+        if self.org_id:
+            key_id_str = await self.get_setting("anthropic_api_key_id")
+            if key_id_str:
+                try:
+                    val = await self.get_api_key_value(int(key_id_str))
+                    if val:
+                        return val
+                except (ValueError, TypeError):
+                    pass
+
+        # 2. First available key
+        result = await self.db.execute(select(ApiKey).order_by(ApiKey.created_at.asc()).limit(1))
+        first = result.scalar_one_or_none()
+        if first:
+            return first.key_value
+
+        # 3. Legacy fallback
+        return cfg.anthropic_api_key or None
+
+    # ── Audit Results ──
+
+    async def save_audit(self, data: dict) -> dict:
+        audit = AuditResult(
+            org_id=self.org_id,
+            audit_type=data["audit_type"],
+            target=data["target"],
+            score=data.get("score", 0),
+            total_issues=data.get("total_issues", 0),
+            result_json=json.dumps(data["result"]) if isinstance(data.get("result"), dict) else data.get("result_json", "{}"),
+        )
+        self.db.add(audit)
+        await self.db.flush()
+        return _serialize_audit(audit)
+
+    async def list_audits(self, audit_type: str | None = None, limit: int = 20) -> list[dict]:
+        query = select(AuditResult).order_by(AuditResult.created_at.desc()).limit(limit)
+        if self.org_id:
+            query = query.where(AuditResult.org_id == self.org_id)
+        if audit_type:
+            query = query.where(AuditResult.audit_type == audit_type)
+        result = await self.db.execute(query)
+        return [_serialize_audit(a) for a in result.scalars().all()]
+
+    async def get_audit(self, audit_id: int) -> dict | None:
+        query = select(AuditResult).where(AuditResult.id == audit_id)
+        if self.org_id:
+            query = query.where(AuditResult.org_id == self.org_id)
+        result = await self.db.execute(query)
+        a = result.scalar_one_or_none()
+        return _serialize_audit(a) if a else None
+
+    async def delete_audit(self, audit_id: int) -> bool:
+        query = select(AuditResult).where(AuditResult.id == audit_id)
+        if self.org_id:
+            query = query.where(AuditResult.org_id == self.org_id)
+        result = await self.db.execute(query)
+        a = result.scalar_one_or_none()
+        if not a:
+            return False
+        await self.db.delete(a)
+        return True
+
     async def commit(self):
         await self.db.commit()
 
@@ -764,4 +893,13 @@ def _serialize_story(s: Story) -> dict:
         "angle": s.angle, "editorial_notes": s.editorial_notes,
         "status": s.status.value,
         "created_at": s.created_at.isoformat() if s.created_at else None,
+    }
+
+
+def _serialize_audit(a: AuditResult) -> dict:
+    return {
+        "id": a.id, "org_id": a.org_id, "audit_type": a.audit_type,
+        "target": a.target, "score": a.score, "total_issues": a.total_issues,
+        "result": json.loads(a.result_json) if a.result_json else {},
+        "created_at": a.created_at.isoformat() if a.created_at else None,
     }

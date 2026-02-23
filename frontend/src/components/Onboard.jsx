@@ -14,6 +14,10 @@ export default function Onboard({ onLog, onComplete }) {
   const [step, setStep] = useState('domain')
   const [domain, setDomain] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [existingKeys, setExistingKeys] = useState([])
+  const [selectedKeyId, setSelectedKeyId] = useState('')
+  const [newKeyLabel, setNewKeyLabel] = useState('')
+  const [keyMode, setKeyMode] = useState('select') // 'select' or 'new'
   const [crawlData, setCrawlData] = useState(null)
   const [profile, setProfile] = useState(null)
   const [dfUrl, setDfUrl] = useState('')
@@ -27,19 +31,57 @@ export default function Onboard({ onLog, onComplete }) {
 
   const currentStepIdx = STEPS.findIndex(s => s.id === step)
 
+  // Load existing API keys on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API}/settings/api-keys`, { headers: { 'Content-Type': 'application/json' } })
+        const data = await res.json()
+        if (Array.isArray(data) && data.length > 0) {
+          setExistingKeys(data)
+          setSelectedKeyId(String(data[0].id))
+          setKeyMode('select')
+        } else {
+          setKeyMode('new')
+        }
+      } catch {
+        setKeyMode('new')
+      }
+    })()
+  }, [])
+
   // ─── STEP 1: CRAWL ───
   const crawl = async () => {
-    if (!domain.trim() || !apiKey.trim()) return
+    const hasKey = keyMode === 'select' ? selectedKeyId : (apiKey.trim() && newKeyLabel.trim())
+    if (!domain.trim() || !hasKey) return
     setLoading(true)
     setError(null)
 
-    // Save API key first so Claude calls work
-    onLog?.('Saving API key...', 'detail')
-    await fetch(`${API}/settings`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: { anthropic_api_key: apiKey } }),
-    })
+    // Save or create API key so Claude calls work
+    let usedKeyId = selectedKeyId
+    if (keyMode === 'new' && apiKey.trim()) {
+      onLog?.('Creating API key...', 'detail')
+      try {
+        const createRes = await fetch(`${API}/settings/api-keys`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label: newKeyLabel.trim() || 'Default', key_value: apiKey.trim() }),
+        })
+        const created = await createRes.json()
+        usedKeyId = String(created.id)
+        setSelectedKeyId(usedKeyId)
+        setExistingKeys(prev => [created, ...prev])
+        setKeyMode('select')
+      } catch (e) {
+        // Fallback: save as legacy setting
+        onLog?.('Saving API key as legacy setting...', 'detail')
+        await fetch(`${API}/settings`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ settings: { anthropic_api_key: apiKey } }),
+        })
+      }
+    }
 
     onLog?.(`CRAWL — scanning ${domain}...`, 'action')
     try {
@@ -175,6 +217,18 @@ export default function Onboard({ onLog, onComplete }) {
         }),
       })
       const data = await res.json()
+
+      // Assign the selected API key to this org
+      if (selectedKeyId && data.org_id) {
+        await fetch(`${API}/settings`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-Org-Id': String(data.org_id) },
+          body: JSON.stringify({ settings: { anthropic_api_key_id: selectedKeyId } }),
+        })
+        const keyLabel = existingKeys.find(k => String(k.id) === selectedKeyId)?.label || selectedKeyId
+        onLog?.(`API key "${keyLabel}" assigned to this company`, 'success')
+      }
+
       onLog?.('PROFILE SAVED — Pressroom is configured', 'success')
       onLog?.('ONBOARDING COMPLETE — head to the desk to start generating', 'success')
       // Pass back the new org so App can switch to it
@@ -217,13 +271,62 @@ export default function Onboard({ onLog, onComplete }) {
           </p>
 
           <div className="onboard-profile" style={{ marginTop: 16 }}>
-            <ProfileField
-              label="Anthropic API Key"
-              value={apiKey}
-              onChange={setApiKey}
-              type="password"
-              placeholder="sk-ant-..."
-            />
+            {/* API Key selection */}
+            <div className="setting-field">
+              <label className="setting-label">Anthropic API Key</label>
+              {existingKeys.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                  <button
+                    className={`btn ${keyMode === 'select' ? 'btn-approve' : ''}`}
+                    style={{ fontSize: 11, padding: '3px 10px' }}
+                    onClick={() => setKeyMode('select')}
+                  >
+                    Use Existing
+                  </button>
+                  <button
+                    className={`btn ${keyMode === 'new' ? 'btn-approve' : ''}`}
+                    style={{ fontSize: 11, padding: '3px 10px' }}
+                    onClick={() => setKeyMode('new')}
+                  >
+                    Add New
+                  </button>
+                </div>
+              )}
+              {keyMode === 'select' && existingKeys.length > 0 ? (
+                <select
+                  className="setting-input"
+                  value={selectedKeyId}
+                  onChange={e => setSelectedKeyId(e.target.value)}
+                  style={{ maxWidth: 400 }}
+                >
+                  {existingKeys.map(k => (
+                    <option key={k.id} value={String(k.id)}>
+                      {k.label} ({k.key_preview})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <>
+                  <input
+                    className="setting-input"
+                    style={{ maxWidth: 400, fontSize: 12, marginBottom: 6 }}
+                    type="text"
+                    value={newKeyLabel}
+                    onChange={e => setNewKeyLabel(e.target.value)}
+                    placeholder="Label (e.g. Client A, Production)"
+                  />
+                  <input
+                    className="setting-input"
+                    style={{ maxWidth: 400 }}
+                    type="password"
+                    value={apiKey}
+                    onChange={e => setApiKey(e.target.value)}
+                    placeholder="sk-ant-..."
+                  />
+                </>
+              )}
+            </div>
+
             <div className="setting-field">
               <label className="setting-label">Website</label>
               <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -239,7 +342,7 @@ export default function Onboard({ onLog, onComplete }) {
                 <button
                   className={`btn btn-approve ${loading ? 'loading' : ''}`}
                   onClick={crawl}
-                  disabled={loading || !domain.trim() || !apiKey.trim()}
+                  disabled={loading || !domain.trim() || (keyMode === 'select' ? !selectedKeyId : (!apiKey.trim() || !newKeyLabel.trim()))}
                 >
                   {loading ? 'Scanning...' : 'Scan & Analyze'}
                 </button>
@@ -248,7 +351,7 @@ export default function Onboard({ onLog, onComplete }) {
           </div>
           <div style={{ marginTop: 16 }}>
             <button className="btn" style={{ color: 'var(--text-dim)', borderColor: 'var(--border)' }} onClick={() => {
-              if (apiKey.trim()) {
+              if (keyMode === 'new' && apiKey.trim()) {
                 fetch(`${API}/settings`, {
                   method: 'PUT',
                   headers: { 'Content-Type': 'application/json' },

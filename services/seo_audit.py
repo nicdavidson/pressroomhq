@@ -14,11 +14,11 @@ log = logging.getLogger("pressroom")
 HEADERS = {"User-Agent": "Pressroom/0.1 (seo-audit)"}
 
 
-def _get_client():
-    return anthropic.Anthropic(api_key=settings.anthropic_api_key)
+def _get_client(api_key: str | None = None):
+    return anthropic.Anthropic(api_key=api_key or settings.anthropic_api_key)
 
 
-async def audit_domain(domain: str, max_pages: int = 15) -> dict:
+async def audit_domain(domain: str, max_pages: int = 15, api_key: str | None = None) -> dict:
     """Run a full SEO audit on a domain. Returns page-level findings + overall recommendations."""
     if not domain.startswith("http"):
         domain = f"https://{domain}"
@@ -46,7 +46,7 @@ async def audit_domain(domain: str, max_pages: int = 15) -> dict:
         p.pop("_html", None)
 
     # Claude analysis
-    recommendations = await _analyze_seo(pages, domain)
+    recommendations = await _analyze_seo(pages, domain, api_key=api_key)
 
     return {
         "domain": domain,
@@ -212,7 +212,7 @@ def _discover_internal_links(html: str, base_url: str, base_host: str) -> list[s
     return urls
 
 
-async def _analyze_seo(pages: list[dict], domain: str) -> dict:
+async def _analyze_seo(pages: list[dict], domain: str, api_key: str | None = None) -> dict:
     """Claude analyzes the SEO audit data and generates recommendations."""
     # Build a summary for Claude
     summary_parts = [f"SEO AUDIT RESULTS FOR {domain}\n{len(pages)} pages crawled.\n"]
@@ -234,7 +234,7 @@ async def _analyze_seo(pages: list[dict], domain: str) -> dict:
     summary_parts.append(f"\nTOTAL ISSUES: {total_issues} across {len(pages)} pages")
 
     try:
-        response = _get_client().messages.create(
+        response = _get_client(api_key).messages.create(
             model=settings.claude_model_fast,
             max_tokens=2000,
             system="""You are an SEO specialist auditing a website. Based on the crawl data, provide:
