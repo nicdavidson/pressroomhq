@@ -76,7 +76,11 @@ async def handle_release(payload: dict, dl: DataLayer) -> dict:
         "body": body[:1000],
     }]
 
-    brief_data = await generate_brief(signal_dicts)
+    # Load voice + memory context
+    voice = await dl.get_voice_settings()
+    memory = await dl.get_memory_context()
+
+    brief_data = await generate_brief(signal_dicts, memory=memory, voice_settings=voice)
     brief = await dl.save_brief({
         "date": str(datetime.date.today()),
         "summary": brief_data["summary"],
@@ -93,8 +97,10 @@ async def handle_release(payload: dict, dl: DataLayer) -> dict:
         ContentChannel.newsletter,
     ]
 
-    memory = await dl.get_memory_context()
-    content_items = await generate_all_content(brief_data["summary"], signal_dicts, all_channels, memory=memory)
+    content_items = await generate_all_content(
+        brief_data["summary"], signal_dicts, all_channels,
+        memory=memory, voice_settings=voice,
+    )
 
     saved = []
     for item in content_items:

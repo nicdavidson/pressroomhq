@@ -114,6 +114,60 @@ class DFClient:
         return await self.db_list(service, table, params)
 
     # ──────────────────────────────────────
+    # Schema introspection
+    # ──────────────────────────────────────
+
+    async def get_service_schema(self, service_name: str) -> dict:
+        """GET /api/v2/{service}/_schema — returns tables + columns for a DB service."""
+        try:
+            return await self.get(f"/api/v2/{service_name}/_schema")
+        except Exception:
+            return {"table": []}
+
+    async def get_table_sample(self, service_name: str, table: str, limit: int = 3) -> list[dict]:
+        """Grab a few sample rows from a table to aid classification."""
+        try:
+            return await self.db_list(service_name, table, params={"limit": limit})
+        except Exception:
+            return []
+
+    async def introspect_all_db_services(self) -> list[dict]:
+        """Discover all DB services and pull their schemas + sample data."""
+        db_services = await self.discover_db_services()
+        results = []
+        for svc in db_services:
+            name = svc.get("name", "")
+            svc_type = svc.get("type", "")
+            label = svc.get("label", name)
+            desc = svc.get("description", "")
+
+            schema = await self.get_service_schema(name)
+            tables = []
+            for tbl in schema.get("table", []):
+                tbl_name = tbl if isinstance(tbl, str) else tbl.get("name", "")
+                if not tbl_name:
+                    continue
+                sample = await self.get_table_sample(name, tbl_name, limit=2)
+                columns = []
+                if sample:
+                    columns = list(sample[0].keys())
+                tables.append({
+                    "name": tbl_name,
+                    "columns": columns,
+                    "sample_row": sample[0] if sample else {},
+                    "row_count": len(sample),
+                })
+
+            results.append({
+                "name": name,
+                "label": label,
+                "type": svc_type,
+                "description": desc,
+                "tables": tables,
+            })
+        return results
+
+    # ──────────────────────────────────────
     # Social posting (via df-social)
     # ──────────────────────────────────────
 

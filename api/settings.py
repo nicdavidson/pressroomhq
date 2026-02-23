@@ -45,6 +45,13 @@ DEFAULTS = {
     "claude_model": "claude-sonnet-4-20250514",
     # Webhook
     "github_webhook_secret": "",
+    # Onboarding metadata
+    "onboard_company_name": "",
+    "onboard_industry": "",
+    "onboard_topics": "[]",
+    "onboard_competitors": "[]",
+    "onboard_complete": "",
+    "df_service_map": "",
 }
 
 # Keys that should be masked in GET responses

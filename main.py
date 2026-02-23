@@ -15,6 +15,7 @@ from api.webhook import router as webhook_router
 from api.publish import router as publish_router
 from api.settings import router as settings_router
 from api.imports import router as imports_router
+from api.onboard import router as onboard_router
 
 
 @asynccontextmanager
@@ -49,6 +50,7 @@ app.include_router(webhook_router)
 app.include_router(publish_router)
 app.include_router(settings_router)
 app.include_router(imports_router)
+app.include_router(onboard_router)
 
 # Serve frontend static files if built — MUST be last (catch-all)
 frontend_dist = Path(__file__).parent / "frontend" / "dist"

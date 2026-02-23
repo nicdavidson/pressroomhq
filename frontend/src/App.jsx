@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import Settings from './components/Settings'
 import Voice from './components/Voice'
 import Import from './components/Import'
+import Onboard from './components/Onboard'
 
 const API = '/api'
 
@@ -44,7 +45,8 @@ export default function App() {
   const [allContent, setAllContent] = useState([])
   const [time, setTime] = useState(formatTime())
   const [expanded, setExpanded] = useState(null)
-  const [view, setView] = useState('desk') // 'desk' | 'voice' | 'import' | 'settings'
+  const [view, setView] = useState('desk') // 'desk' | 'voice' | 'import' | 'settings' | 'onboard'
+  const [onboarded, setOnboarded] = useState(null) // null = loading, true/false
 
   // Loading states per action
   const [loading, setLoading] = useState({})
@@ -54,6 +56,14 @@ export default function App() {
 
   const log = useCallback((msg, type = 'info') => {
     setLogs(prev => [...prev.slice(-200), { ts: ts(), msg, type }])
+  }, [])
+
+  // Check onboarding status
+  useEffect(() => {
+    fetch(`${API}/onboard/status`).then(r => r.json()).then(data => {
+      setOnboarded(data.complete)
+      if (!data.complete) setView('onboard')
+    }).catch(() => setOnboarded(true)) // assume onboarded if check fails
   }, [])
 
   // Auto-scroll log
@@ -215,6 +225,7 @@ export default function App() {
             <div className="header-edition">Daily Edition</div>
           </div>
           <nav className="nav-tabs">
+            {!onboarded && <button className={`nav-tab ${view === 'onboard' ? 'active' : ''}`} onClick={() => setView('onboard')}>Setup</button>}
             <button className={`nav-tab ${view === 'desk' ? 'active' : ''}`} onClick={() => setView('desk')}>Desk</button>
             <button className={`nav-tab ${view === 'voice' ? 'active' : ''}`} onClick={() => setView('voice')}>Voice</button>
             <button className={`nav-tab ${view === 'import' ? 'active' : ''}`} onClick={() => setView('import')}>Import</button>
@@ -228,12 +239,13 @@ export default function App() {
       </div>
 
       {/* MAIN LAYOUT */}
-      {(view === 'settings' || view === 'voice' || view === 'import') && (
+      {(view === 'settings' || view === 'voice' || view === 'import' || view === 'onboard') && (
         <div className="pressroom" style={{ gridTemplateColumns: '1fr' }}>
           <div className="desk-area" style={{ gridTemplateRows: '1fr 220px' }}>
             {view === 'settings' && <Settings onLog={log} />}
             {view === 'voice' && <Voice onLog={log} />}
             {view === 'import' && <Import onLog={log} />}
+            {view === 'onboard' && <Onboard onLog={log} onComplete={() => { setOnboarded(true); setView('desk') }} />}
             {/* ACTIVITY LOG */}
             <div className="log-panel">
               <div className="panel-header">

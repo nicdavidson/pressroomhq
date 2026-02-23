@@ -39,8 +39,12 @@ async def trigger_generate(
     if not signal_dicts:
         return {"error": "No signals found. Run /api/pipeline/scout first."}
 
-    # Generate brief
-    brief_data = await generate_brief(signal_dicts)
+    # Load voice settings and memory context
+    voice = await dl.get_voice_settings()
+    memory = await dl.get_memory_context()
+
+    # Generate brief (now voice-aware and intelligence-aware)
+    brief_data = await generate_brief(signal_dicts, memory=memory, voice_settings=voice)
     brief = await dl.save_brief({
         "date": str(datetime.date.today()),
         "summary": brief_data["summary"],
@@ -53,9 +57,11 @@ async def trigger_generate(
     if channels:
         target_channels = [ContentChannel(c) for c in channels]
 
-    # Generate content with memory context
-    memory = await dl.get_memory_context()
-    content_items = await generate_all_content(brief_data["summary"], signal_dicts, target_channels, memory=memory)
+    # Generate content with memory + voice + DF intelligence
+    content_items = await generate_all_content(
+        brief_data["summary"], signal_dicts, target_channels,
+        memory=memory, voice_settings=voice,
+    )
 
     saved_content = []
     for item in content_items:
@@ -97,8 +103,12 @@ async def full_run(since_hours: int = 24, dl: DataLayer = Depends(get_data_layer
 
     signal_dicts = saved_signals
 
-    # Brief
-    brief_data = await generate_brief(signal_dicts)
+    # Load voice settings and memory context
+    voice = await dl.get_voice_settings()
+    memory = await dl.get_memory_context()
+
+    # Brief (voice-aware, intelligence-aware)
+    brief_data = await generate_brief(signal_dicts, memory=memory, voice_settings=voice)
     brief = await dl.save_brief({
         "date": str(datetime.date.today()),
         "summary": brief_data["summary"],
@@ -106,9 +116,11 @@ async def full_run(since_hours: int = 24, dl: DataLayer = Depends(get_data_layer
         "signal_ids": ",".join(str(s.get("id", "")) for s in signal_dicts[:10]),
     })
 
-    # Generate all channels with memory context
-    memory = await dl.get_memory_context()
-    content_items = await generate_all_content(brief_data["summary"], signal_dicts, memory=memory)
+    # Generate all channels with full context
+    content_items = await generate_all_content(
+        brief_data["summary"], signal_dicts,
+        memory=memory, voice_settings=voice,
+    )
 
     saved_content = []
     for item in content_items:

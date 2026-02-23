@@ -269,14 +269,85 @@ class DataLayer:
 
     async def get_memory_context(self) -> dict:
         """Gather the full memory context for the engine — approved examples,
-        spiked anti-patterns, recent topics per channel. This is the flywheel."""
+        spiked anti-patterns, recent topics per channel, and DF intelligence. This is the flywheel."""
         channels = ["linkedin", "x_thread", "blog", "release_email", "newsletter"]
-        memory = {"approved": {}, "spiked": {}, "recent_topics": []}
+        memory = {"approved": {}, "spiked": {}, "recent_topics": [], "df_intelligence": {}}
         for ch in channels:
             memory["approved"][ch] = await self.get_approved_by_channel(ch, limit=3)
             memory["spiked"][ch] = await self.get_spiked_by_channel(ch, limit=3)
         memory["recent_topics"] = await self.get_recent_topics(days=21)
+
+        # Pull DF intelligence if service map exists
+        memory["df_intelligence"] = await self.get_df_intelligence()
+
         return memory
+
+    async def get_df_intelligence(self) -> dict:
+        """Query DF intelligence sources based on the stored service map.
+
+        Reads the service map from settings, finds intelligence sources,
+        queries their useful tables, and returns summarized data for the engine."""
+        if not df.available:
+            return {}
+
+        # Get service map from settings
+        result = await self.db.execute(select(Setting).where(Setting.key == "df_service_map"))
+        setting = result.scalar_one_or_none()
+        if not setting or not setting.value:
+            return {}
+
+        try:
+            service_map_data = json.loads(setting.value)
+        except json.JSONDecodeError:
+            return {}
+
+        service_map = service_map_data.get("service_map", service_map_data)
+        intelligence = {}
+
+        for svc_name, svc_info in service_map.items():
+            role = svc_info.get("role", "unknown")
+            if role in ("unknown", "internal", "publishing_channel"):
+                continue
+
+            useful_tables = svc_info.get("useful_tables", [])
+            if not useful_tables:
+                continue
+
+            svc_data = {"role": role, "description": svc_info.get("description", ""), "data": []}
+
+            for table in useful_tables[:3]:  # limit to 3 tables per service
+                try:
+                    rows = await df.db_query(svc_name, table, order="id DESC", limit=10)
+                    if rows:
+                        # Summarize — just grab key fields, truncate values
+                        summarized = []
+                        for row in rows:
+                            summary = {}
+                            for k, v in list(row.items())[:6]:
+                                summary[k] = str(v)[:200] if v else ""
+                            summarized.append(summary)
+                        svc_data["data"].append({"table": table, "recent_rows": summarized})
+                except Exception:
+                    continue
+
+            if svc_data["data"]:
+                intelligence[svc_name] = svc_data
+
+        return intelligence
+
+    async def get_voice_settings(self) -> dict:
+        """Load voice settings from the DB for the engine."""
+        voice_keys = [
+            "voice_persona", "voice_bio", "voice_audience", "voice_tone",
+            "voice_never_say", "voice_always", "voice_brand_keywords",
+            "voice_writing_examples",
+            "voice_linkedin_style", "voice_x_style", "voice_blog_style",
+            "voice_email_style", "voice_newsletter_style", "voice_yt_style",
+            "onboard_company_name", "onboard_industry", "onboard_topics", "onboard_competitors",
+        ]
+        result = await self.db.execute(select(Setting).where(Setting.key.in_(voice_keys)))
+        settings = {s.key: s.value for s in result.scalars().all()}
+        return settings
 
     async def commit(self):
         await self.db.commit()
