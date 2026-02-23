@@ -13,6 +13,7 @@ const STEPS = [
 export default function Onboard({ onLog, onComplete }) {
   const [step, setStep] = useState('domain')
   const [domain, setDomain] = useState('')
+  const [apiKey, setApiKey] = useState('')
   const [crawlData, setCrawlData] = useState(null)
   const [profile, setProfile] = useState(null)
   const [dfUrl, setDfUrl] = useState('')
@@ -35,9 +36,18 @@ export default function Onboard({ onLog, onComplete }) {
 
   // ─── STEP 1: CRAWL ───
   const crawl = async () => {
-    if (!domain.trim()) return
+    if (!domain.trim() || !apiKey.trim()) return
     setLoading(true)
     setError(null)
+
+    // Save API key first so Claude calls work
+    onLog?.('Saving API key...', 'detail')
+    await fetch(`${API}/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings: { anthropic_api_key: apiKey } }),
+    })
+
     onLog?.(`CRAWL — scanning ${domain}...`, 'action')
     try {
       const res = await fetch(`${API}/onboard/crawl`, {
@@ -56,6 +66,10 @@ export default function Onboard({ onLog, onComplete }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ crawl_data: data }),
       })
+      if (!profRes.ok) {
+        const errText = await profRes.text()
+        throw new Error(`Profile API error: ${profRes.status} ${errText.slice(0, 100)}`)
+      }
       const profData = await profRes.json()
       if (profData.profile && !profData.profile.error) {
         setProfile(profData.profile)
@@ -187,32 +201,53 @@ export default function Onboard({ onLog, onComplete }) {
       {/* STEP 1: DOMAIN */}
       {step === 'domain' && (
         <div className="onboard-panel">
-          <h2 className="settings-title">What's your website?</h2>
+          <h2 className="settings-title">Let's Get Started</h2>
           <p className="onboard-subtitle">
-            We'll crawl your site and build a content profile from what we find.
+            Enter your Anthropic API key and website. We'll crawl your site and build a content profile with Claude.
           </p>
-          <div style={{ display: 'flex', gap: 10, marginTop: 20, alignItems: 'center' }}>
-            <input
-              className="setting-input"
-              style={{ maxWidth: 400, fontSize: 16 }}
-              type="text"
-              value={domain}
-              onChange={e => setDomain(e.target.value)}
-              placeholder="yourcompany.com"
-              onKeyDown={e => e.key === 'Enter' && crawl()}
-              autoFocus
+
+          <div className="onboard-profile" style={{ marginTop: 16 }}>
+            <ProfileField
+              label="Anthropic API Key"
+              value={apiKey}
+              onChange={setApiKey}
+              type="password"
+              placeholder="sk-ant-..."
             />
-            <button
-              className={`btn btn-approve ${loading ? 'loading' : ''}`}
-              onClick={crawl}
-              disabled={loading || !domain.trim()}
-            >
-              {loading ? 'Scanning...' : 'Scan'}
-            </button>
+            <div className="setting-field">
+              <label className="setting-label">Website</label>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                <input
+                  className="setting-input"
+                  style={{ maxWidth: 400, fontSize: 14 }}
+                  type="text"
+                  value={domain}
+                  onChange={e => setDomain(e.target.value)}
+                  placeholder="yourcompany.com"
+                  onKeyDown={e => e.key === 'Enter' && crawl()}
+                />
+                <button
+                  className={`btn btn-approve ${loading ? 'loading' : ''}`}
+                  onClick={crawl}
+                  disabled={loading || !domain.trim() || !apiKey.trim()}
+                >
+                  {loading ? 'Scanning...' : 'Scan & Analyze'}
+                </button>
+              </div>
+            </div>
           </div>
           <div style={{ marginTop: 16 }}>
-            <button className="btn" style={{ color: 'var(--text-dim)', borderColor: 'var(--border)' }} onClick={() => setStep('profile')}>
-              Skip — I'll set up manually
+            <button className="btn" style={{ color: 'var(--text-dim)', borderColor: 'var(--border)' }} onClick={() => {
+              if (apiKey.trim()) {
+                fetch(`${API}/settings`, {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ settings: { anthropic_api_key: apiKey } }),
+                })
+              }
+              setStep('profile')
+            }}>
+              Skip crawl — set up manually
             </button>
           </div>
         </div>

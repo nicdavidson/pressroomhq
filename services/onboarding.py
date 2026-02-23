@@ -15,7 +15,9 @@ import anthropic
 from config import settings
 
 
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+def _get_client():
+    """Lazy client — picks up the API key at call time, not import time."""
+    return anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
 
 # ──────────────────────────────────────
@@ -109,7 +111,7 @@ Return a JSON object with these exact fields:
 
 Be specific to THIS company. Not generic marketing advice. Derive everything from what you actually see on their site."""
 
-    response = client.messages.create(
+    response = _get_client().messages.create(
         model=settings.claude_model,
         max_tokens=2000,
         system="You are a content strategist analyzing a company to set up their AI content engine. Return valid JSON only.",
@@ -184,7 +186,7 @@ Return a JSON object:
   "publishing_channels": ["service names for publishing content"]
 }}"""
 
-    response = client.messages.create(
+    response = _get_client().messages.create(
         model=settings.claude_model,
         max_tokens=2000,
         system="You are a data architect classifying connected services for an AI content platform. Return valid JSON only. Be specific about what each service provides.",

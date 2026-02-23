@@ -12,7 +12,9 @@ from config import settings
 from models import ContentChannel
 
 
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+def _get_client():
+    """Lazy client — picks up the API key at call time, not import time."""
+    return anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
 # Fallback voice if no settings configured
 DEFAULT_VOICE = {
@@ -245,7 +247,7 @@ async def generate_brief(signals: list[dict], memory: dict | None = None,
 
     voice_block = _build_voice_block(voice_settings)
 
-    response = client.messages.create(
+    response = _get_client().messages.create(
         model=settings.claude_model,
         max_tokens=1000,
         system=f"""You are the wire editor at a content operations platform. You receive the day's signals — releases, trends, community posts, support patterns — and synthesize them into a daily brief.
@@ -286,7 +288,7 @@ async def generate_content(brief: str, signals: list[dict], channel: ContentChan
     intel_block = _build_intelligence_block(memory)
     intel_section = f"\n\nCompany intelligence:\n{intel_block}" if intel_block else ""
 
-    response = client.messages.create(
+    response = _get_client().messages.create(
         model=settings.claude_model,
         max_tokens=2000,
         system=system_prompt,
