@@ -9,10 +9,66 @@ The onboarding flow:
 
 import re
 import json
+import logging
 import httpx
 import anthropic
 
 from config import settings
+
+log = logging.getLogger("pressroom")
+
+
+def _repair_json(text: str) -> dict | None:
+    """Try to parse JSON, repairing common LLM output issues."""
+    # Strip markdown fences
+    text = re.sub(r'^```(?:json)?\s*', '', text.strip())
+    text = re.sub(r'\s*```$', '', text.strip())
+
+    # Direct parse first
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Find outermost { ... }
+    start = text.find('{')
+    end = text.rfind('}')
+    if start == -1 or end == -1:
+        return None
+    candidate = text[start:end + 1]
+
+    try:
+        return json.loads(candidate)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Repair: escape control chars inside string values
+    repaired = re.sub(r'(?<=: ")([^"]*?)(?=")', lambda m: m.group(1).replace('\n', '\\n').replace('\t', '\\t'), candidate)
+    try:
+        return json.loads(repaired)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Repair: if truncated, try closing open structures
+    balanced = candidate
+    open_braces = balanced.count('{') - balanced.count('}')
+    open_brackets = balanced.count('[') - balanced.count(']')
+    if open_braces > 0 or open_brackets > 0:
+        # Trim to last complete key-value pair
+        last_comma = balanced.rfind(',')
+        last_brace = balanced.rfind('}')
+        last_bracket = balanced.rfind(']')
+        # Find the last "good" stopping point
+        cut = max(last_comma, last_brace, last_bracket)
+        if cut > len(balanced) // 2:
+            balanced = balanced[:cut]
+        balanced += ']' * open_brackets + '}' * open_braces
+        try:
+            return json.loads(balanced)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return None
 
 
 def _get_client():
@@ -24,25 +80,228 @@ def _get_client():
 # Domain Crawl
 # ──────────────────────────────────────
 
+MAX_PAGES = 15  # Don't hammer any site
+
+# Keywords for labeling discovered URLs
+_LABEL_HINTS = {
+    "about": ["about", "company", "team", "who-we-are", "our-story"],
+    "pricing": ["pricing", "plans", "price", "cost"],
+    "blog": ["blog", "news", "articles", "insights", "resources"],
+    "docs": ["docs", "documentation", "developers", "api", "reference", "guides"],
+    "product": ["product", "features", "platform", "solutions", "services"],
+    "contact": ["contact", "support", "help"],
+    "careers": ["careers", "jobs", "hiring", "work-with-us"],
+    "customers": ["customers", "case-studies", "testimonials", "stories"],
+    "integrations": ["integrations", "partners", "marketplace", "ecosystem"],
+}
+
+
+def _root_domain(host: str) -> str:
+    """Extract root domain — 'wiki.dreamfactory.com' → 'dreamfactory.com'."""
+    host = host.lower().removeprefix("www.")
+    parts = host.split(".")
+    # Handle two-part TLDs like co.uk, com.au
+    if len(parts) >= 3 and len(parts[-2]) <= 3:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _is_same_org(host: str, base_host: str) -> bool:
+    """Check if a host belongs to the same org (root domain match)."""
+    return _root_domain(host) == _root_domain(base_host)
+
+
+def _subdomain_prefix(host: str, base_host: str) -> str:
+    """Get the subdomain prefix — 'wiki.dreamfactory.com' → 'wiki'."""
+    host = host.lower().removeprefix("www.")
+    base = _root_domain(base_host)
+    if host == base:
+        return ""
+    prefix = host.removesuffix(f".{base}").removesuffix("www.")
+    return prefix if prefix != host else ""
+
+
+def _label_url(url: str, base: str) -> str | None:
+    """Classify a URL by its path. Returns a label or None if uninteresting."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    base_parsed = urlparse(base)
+    path = parsed.path.lower().strip("/")
+
+    # Subdomain handling — label by subdomain name if it's a different host
+    sub = _subdomain_prefix(parsed.netloc, base_parsed.netloc)
+
+    if not path:
+        # Subdomain root (e.g. blog.example.com) → "sub:blog"
+        return f"sub:{sub}" if sub else "homepage"
+
+    # For subdomains, grab root + one level deep (e.g. guide.example.com/docs)
+    if sub:
+        if path.count("/") == 0 and len(path) < 40:
+            return f"sub:{sub}"  # Collapse to subdomain root label
+        return None
+
+    # Skip assets, anchors, auth, and deep paths (likely blog posts, not key pages)
+    if any(path.endswith(ext) for ext in (".png", ".jpg", ".svg", ".css", ".js", ".xml", ".pdf")):
+        return None
+    if path.count("/") > 2:
+        return None
+    skip_patterns = ["login", "signup", "sign-up", "register", "cart", "checkout", "account",
+                     "privacy", "terms", "cookie", "legal", "sitemap"]
+    if any(s in path for s in skip_patterns):
+        return None
+
+    for label, hints in _LABEL_HINTS.items():
+        if any(h in path for h in hints):
+            return label
+
+    # If it's a top-level page we don't recognize, still grab it
+    if path.count("/") == 0 and len(path) < 40:
+        return path
+
+    return None
+
+
+async def _discover_from_sitemap(client: httpx.AsyncClient, base: str) -> dict[str, str]:
+    """Try sitemap.xml → return {label: url} for interesting pages."""
+    from urllib.parse import urlparse
+    base_host = urlparse(base).netloc
+    discovered = {}
+
+    for sitemap_path in ["/sitemap.xml", "/sitemap_index.xml"]:
+        try:
+            resp = await client.get(f"{base}{sitemap_path}",
+                                    headers={"User-Agent": "Pressroom/0.1 (content-engine)"})
+            if resp.status_code != 200:
+                continue
+            # Extract URLs from <loc> tags
+            urls = re.findall(r'<loc>\s*(.*?)\s*</loc>', resp.text)
+            for url in urls:
+                url = url.strip()
+                # If it's a sub-sitemap, fetch that too (one level deep)
+                if url.endswith(".xml"):
+                    try:
+                        sub_resp = await client.get(url, headers={"User-Agent": "Pressroom/0.1 (content-engine)"})
+                        if sub_resp.status_code == 200:
+                            sub_urls = re.findall(r'<loc>\s*(.*?)\s*</loc>', sub_resp.text)
+                            for su in sub_urls:
+                                su = su.strip()
+                                su_host = urlparse(su).netloc
+                                if not _is_same_org(su_host, base_host):
+                                    continue
+                                label = _label_url(su, base)
+                                if label and label not in discovered:
+                                    discovered[label] = su
+                    except Exception:
+                        pass
+                    continue
+                # Check org match for non-sitemap URLs too
+                url_host = urlparse(url).netloc
+                if url_host and not _is_same_org(url_host, base_host):
+                    continue
+                label = _label_url(url, base)
+                if label and label not in discovered:
+                    discovered[label] = url
+            if discovered:
+                break
+        except Exception:
+            continue
+    return discovered
+
+
+async def _discover_from_nav(client: httpx.AsyncClient, base: str, homepage_html: str) -> dict[str, str]:
+    """Parse homepage HTML for internal nav links → {label: url}."""
+    from urllib.parse import urljoin, urlparse
+    discovered = {}
+    base_host = urlparse(base).netloc
+
+    # Extract hrefs from the page
+    hrefs = re.findall(r'<a[^>]+href=["\']([^"\'#]+)["\']', homepage_html, re.IGNORECASE)
+
+    for href in hrefs:
+        url = urljoin(base, href)
+        parsed = urlparse(url)
+
+        # Same org (root domain match) — allows subdomains
+        if parsed.netloc and not _is_same_org(parsed.netloc, base_host):
+            continue
+
+        label = _label_url(url, base)
+        if label and label not in discovered:
+            discovered[label] = url
+
+    return discovered
+
+
+_SOCIAL_PATTERNS = {
+    "linkedin": r'https?://(?:www\.)?linkedin\.com/(?:company|in)/[^\s"\'<>]+',
+    "x": r'https?://(?:www\.)?(?:twitter\.com|x\.com)/[^\s"\'<>]+',
+    "facebook": r'https?://(?:www\.)?facebook\.com/[^\s"\'<>]+',
+    "instagram": r'https?://(?:www\.)?instagram\.com/[^\s"\'<>]+',
+    "youtube": r'https?://(?:www\.)?youtube\.com/(?:@|channel/|c/)[^\s"\'<>]+',
+    "github": r'https?://(?:www\.)?github\.com/[^\s"\'<>]+',
+    "tiktok": r'https?://(?:www\.)?tiktok\.com/@[^\s"\'<>]+',
+}
+
+
+def _extract_social_links(html: str) -> dict[str, str]:
+    """Pull social media profile URLs from page HTML."""
+    found = {}
+    for platform, pattern in _SOCIAL_PATTERNS.items():
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            url = match.group(0).rstrip('/')
+            # Skip generic share/intent links
+            if any(skip in url.lower() for skip in ['/sharer', '/intent/', '/share?', '/dialog/']):
+                continue
+            found[platform] = url
+    return found
+
+
 async def crawl_domain(domain: str) -> dict:
-    """Crawl a domain's key pages and extract text content."""
+    """Crawl a domain's key pages via sitemap discovery + nav link extraction."""
     if not domain.startswith("http"):
         domain = f"https://{domain}"
     domain = domain.rstrip("/")
 
     pages = {}
-    targets = {
-        "homepage": domain,
-        "about": f"{domain}/about",
-        "blog": f"{domain}/blog",
-        "pricing": f"{domain}/pricing",
-        "docs": f"{domain}/docs",
-    }
+    headers = {"User-Agent": "Pressroom/0.1 (content-engine)"}
 
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
-        for label, url in targets.items():
+        # Always grab homepage first
+        homepage_html = ""
+        try:
+            resp = await c.get(domain, headers=headers)
+            if resp.status_code == 200:
+                homepage_html = resp.text
+                text = _extract_text(homepage_html)
+                if text and len(text) > 50:
+                    pages["homepage"] = {"url": domain, "text": text[:5000]}
+        except Exception:
+            pass
+
+        # Extract social media profiles from homepage
+        socials = _extract_social_links(homepage_html) if homepage_html else {}
+
+        # Discover pages: sitemap + nav links (always run both)
+        targets = await _discover_from_sitemap(c, domain)
+        if homepage_html:
+            nav_targets = await _discover_from_nav(c, domain, homepage_html)
+            # Merge — sitemap wins on conflicts for same labels
+            for label, url in nav_targets.items():
+                if label not in targets:
+                    targets[label] = url
+
+        # Remove homepage from targets (already crawled)
+        targets.pop("homepage", None)
+
+        # Prioritize: subdomains first (high-value distinct properties), then main pages
+        sorted_targets = sorted(targets.items(), key=lambda x: (0 if x[0].startswith("sub:") else 1, x[0]))
+
+        # Crawl discovered pages up to limit
+        for label, url in sorted_targets[:MAX_PAGES]:
             try:
-                resp = await c.get(url, headers={"User-Agent": "Pressroom/0.1 (content-engine)"})
+                resp = await c.get(url, headers=headers)
                 if resp.status_code == 200:
                     text = _extract_text(resp.text)
                     if text and len(text) > 50:
@@ -54,6 +313,7 @@ async def crawl_domain(domain: str) -> dict:
         "domain": domain,
         "pages_found": list(pages.keys()),
         "pages": pages,
+        "social_profiles": socials,
     }
 
 
@@ -80,6 +340,12 @@ async def synthesize_profile(crawl_data: dict, extra_context: str = "") -> dict:
     for label, page in crawl_data.get("pages", {}).items():
         pages_text += f"\n--- {label.upper()} ({page['url']}) ---\n{page['text'][:3000]}\n"
 
+    # Social profiles from crawl
+    socials = crawl_data.get("social_profiles", {})
+    socials_text = ""
+    if socials:
+        socials_text = "\nSOCIAL PROFILES FOUND:\n" + "\n".join(f"  {p}: {u}" for p, u in socials.items()) + "\n"
+
     if not pages_text.strip():
         return {"error": "No page content to analyze"}
 
@@ -89,44 +355,100 @@ Website: {crawl_data.get('domain', 'unknown')}
 
 {pages_text}
 
+{socials_text}
 {f'Additional context from user: {extra_context}' if extra_context else ''}
 
-Return a JSON object with these exact fields:
-{{
-  "company_name": "The company name",
-  "industry": "Primary industry/sector",
-  "persona": "2-3 sentence description of the company voice/persona for content",
-  "bio": "One-line company bio for author attribution",
-  "audience": "Who their content targets",
-  "tone": "Tone descriptors (e.g. 'Technical, direct, no-nonsense')",
-  "never_say": ["list", "of", "words/phrases", "to", "avoid"],
-  "brand_keywords": ["key", "brand", "terms", "product names"],
-  "always": "What their content should always do/include",
-  "topics": ["key", "content", "topics", "they", "cover"],
-  "competitors": ["known", "competitors"],
-  "linkedin_style": "LinkedIn-specific voice notes",
-  "x_style": "X/Twitter-specific voice notes",
-  "blog_style": "Blog-specific voice notes"
-}}
+Return ONLY a valid JSON object (no markdown, no commentary) with these exact fields:
+- company_name: string
+- industry: string
+- persona: string (2-3 sentences, the company voice)
+- bio: string (one-liner for author attribution)
+- audience: string
+- tone: string (e.g. "Technical, direct, no-nonsense")
+- never_say: array of strings
+- brand_keywords: array of strings
+- always: string
+- topics: array of strings
+- competitors: array of strings
+- linkedin_style: string
+- x_style: string
+- blog_style: string
+- social_profiles: object with keys linkedin, x, facebook, instagram, youtube, github (values are URL strings or null)
+
+IMPORTANT: Escape all special characters in JSON strings. Do not use unescaped quotes or newlines inside string values.
 
 Be specific to THIS company. Not generic marketing advice. Derive everything from what you actually see on their site."""
 
     response = _get_client().messages.create(
         model=settings.claude_model_fast,
-        max_tokens=2000,
-        system="You are a content strategist analyzing a company to set up their AI content engine. Return valid JSON only.",
+        max_tokens=4000,
+        system="You are a content strategist analyzing a company to set up their AI content engine. Return valid JSON only, no markdown fences.",
         messages=[{"role": "user", "content": prompt}],
     )
 
     text = response.content[0].text
-    # Extract JSON from response (handle markdown code blocks)
-    json_match = re.search(r'\{[\s\S]*\}', text)
-    if json_match:
-        try:
-            return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            return {"error": "Failed to parse profile", "raw": text}
-    return {"error": "No profile generated", "raw": text}
+    log.info("PROFILE RAW RESPONSE (%d chars): %s", len(text), text[:500])
+
+    parsed = _repair_json(text)
+    if parsed and isinstance(parsed, dict) and not parsed.get("error"):
+        return parsed
+
+    log.error("PROFILE JSON PARSE FAILED.\nRAW: %s", text[:1000])
+    return {"error": "Failed to parse profile — Claude returned malformed JSON", "raw": text[:500]}
+
+
+# ──────────────────────────────────────
+# Scout Source Generation
+# ──────────────────────────────────────
+
+async def generate_scout_sources(profile: dict) -> dict:
+    """Claude generates relevant scout sources from a company profile.
+
+    Returns subreddits, HN keywords, GitHub repos, and RSS feeds
+    tailored to this specific company.
+    """
+    company = profile.get("company_name", "Unknown")
+    industry = profile.get("industry", "")
+    topics = profile.get("topics", [])
+    competitors = profile.get("competitors", [])
+    audience = profile.get("audience", "")
+
+    prompt = f"""Based on this company profile, generate the best signal sources for their AI content engine.
+
+Company: {company}
+Industry: {industry}
+Key topics: {', '.join(topics) if isinstance(topics, list) else topics}
+Competitors: {', '.join(competitors) if isinstance(competitors, list) else competitors}
+Audience: {audience}
+
+Return ONLY a valid JSON object with:
+
+- subreddits: array of 5-8 subreddit names (without r/) where this company's audience hangs out or discusses relevant topics. Be specific — not just "webdev" but subreddits where their actual customers would be.
+
+- hn_keywords: array of 10-15 keywords/phrases to match on Hacker News. Include the company name, product category terms, competitor names, and technology terms. Think about what HN titles would be relevant content signals.
+
+- github_repos: array of 2-5 GitHub repos to watch (owner/repo format). Include the company's own repo if they have one, plus key competitor or ecosystem repos.
+
+- rss_feeds: array of 3-5 RSS feed URLs for industry blogs, competitor blogs, or news sources. Only include feeds you're confident exist (major tech blogs, known company blogs).
+
+Be SPECIFIC to this company. A DreamFactory (API platform) company should NOT get r/homelab. An e-commerce company should NOT get r/webdev. Think about WHO their customers are and WHERE those people talk."""
+
+    response = _get_client().messages.create(
+        model=settings.claude_model_fast,
+        max_tokens=1500,
+        system="You are a content strategist. Return valid JSON only, no markdown fences.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    text = response.content[0].text
+    log.info("SCOUT SOURCES RAW (%d chars): %s", len(text), text[:500])
+
+    parsed = _repair_json(text)
+    if parsed and isinstance(parsed, dict):
+        return parsed
+
+    log.error("SCOUT SOURCES PARSE FAILED.\nRAW: %s", text[:1000])
+    return {}
 
 
 # ──────────────────────────────────────
@@ -194,13 +516,14 @@ Return a JSON object:
     )
 
     text = response.content[0].text
-    json_match = re.search(r'\{[\s\S]*\}', text)
-    if json_match:
-        try:
-            return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            return {"error": "Failed to parse classification", "raw": text}
-    return {"error": "No classification generated", "raw": text}
+    log.info("CLASSIFY RAW RESPONSE (%d chars): %s", len(text), text[:500])
+
+    parsed = _repair_json(text)
+    if parsed and isinstance(parsed, dict):
+        return parsed
+
+    log.error("CLASSIFY JSON PARSE FAILED.\nRAW: %s", text[:1000])
+    return {"error": "Failed to parse classification", "raw": text[:500]}
 
 
 # ──────────────────────────────────────

@@ -2,14 +2,18 @@
 
 This is the abstraction that lets Pressroom work standalone (SQLite) or
 with DreamFactory as the backend. The API endpoints don't care which.
+
+All queries are scoped by org_id for multi-tenant isolation.
 """
 
 import datetime
 import json
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Signal, Brief, Content, Setting, SignalType, ContentChannel, ContentStatus
+from models import (Signal, Brief, Content, Setting, Organization, DataSource,
+                    CompanyAsset, Story, StorySignal,
+                    SignalType, ContentChannel, ContentStatus, StoryStatus)
 from services.df_client import df
 
 
@@ -18,10 +22,12 @@ DF_DB_SERVICE = "pressroom_db"
 
 
 class DataLayer:
-    """Unified data access — checks DF first, falls back to SQLite."""
+    """Unified data access — checks DF first, falls back to SQLite.
+    All operations scoped to org_id."""
 
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, org_id: int | None = None):
         self.db = db_session
+        self.org_id = org_id
         self._use_df = None  # lazy check
 
     async def _should_use_df(self) -> bool:
@@ -39,12 +45,45 @@ class DataLayer:
         return self._use_df
 
     # ──────────────────────────────────────
+    # Organizations
+    # ──────────────────────────────────────
+
+    async def create_org(self, name: str, domain: str = "") -> dict:
+        org = Organization(name=name, domain=domain)
+        self.db.add(org)
+        await self.db.flush()
+        return {"id": org.id, "name": org.name, "domain": org.domain,
+                "created_at": org.created_at.isoformat() if org.created_at else None}
+
+    async def list_orgs(self) -> list[dict]:
+        result = await self.db.execute(select(Organization).order_by(Organization.created_at.desc()))
+        return [{"id": o.id, "name": o.name, "domain": o.domain,
+                 "created_at": o.created_at.isoformat() if o.created_at else None}
+                for o in result.scalars().all()]
+
+    async def get_org(self, org_id: int) -> dict | None:
+        result = await self.db.execute(select(Organization).where(Organization.id == org_id))
+        o = result.scalar_one_or_none()
+        if not o:
+            return None
+        return {"id": o.id, "name": o.name, "domain": o.domain,
+                "created_at": o.created_at.isoformat() if o.created_at else None}
+
+    async def delete_org(self, org_id: int) -> bool:
+        result = await self.db.execute(select(Organization).where(Organization.id == org_id))
+        o = result.scalar_one_or_none()
+        if not o:
+            return False
+        await self.db.delete(o)
+        return True
+
+    # ──────────────────────────────────────
     # Signals
     # ──────────────────────────────────────
 
     async def save_signal(self, data: dict) -> dict:
         if await self._should_use_df():
-            records = await df.db_create(DF_DB_SERVICE, "pressroom_signals", [{
+            record = {
                 "type": data["type"] if isinstance(data["type"], str) else data["type"].value,
                 "source": data["source"],
                 "title": data["title"],
@@ -52,10 +91,14 @@ class DataLayer:
                 "url": data.get("url", ""),
                 "raw_data": data.get("raw_data", ""),
                 "created_at": datetime.datetime.utcnow().isoformat(),
-            }])
+            }
+            if self.org_id:
+                record["org_id"] = self.org_id
+            records = await df.db_create(DF_DB_SERVICE, "pressroom_signals", [record])
             return records[0] if records else {}
 
         signal = Signal(
+            org_id=self.org_id,
             type=data["type"] if isinstance(data["type"], SignalType) else SignalType(data["type"]),
             source=data["source"],
             title=data["title"],
@@ -66,7 +109,7 @@ class DataLayer:
         self.db.add(signal)
         await self.db.flush()
         return {"id": signal.id, "type": signal.type.value, "source": signal.source,
-                "title": signal.title, "body": signal.body}
+                "title": signal.title, "body": signal.body, "prioritized": 0}
 
     async def get_signal(self, signal_id: int) -> dict | None:
         if await self._should_use_df():
@@ -75,21 +118,54 @@ class DataLayer:
             except Exception:
                 return None
 
-        result = await self.db.execute(select(Signal).where(Signal.id == signal_id))
+        query = select(Signal).where(Signal.id == signal_id)
+        if self.org_id:
+            query = query.where(Signal.org_id == self.org_id)
+        result = await self.db.execute(query)
         s = result.scalar_one_or_none()
         if not s:
             return None
         return {"id": s.id, "type": s.type.value, "source": s.source, "title": s.title,
-                "body": s.body, "url": s.url, "created_at": s.created_at.isoformat() if s.created_at else None}
+                "body": s.body, "url": s.url, "prioritized": s.prioritized or 0,
+                "created_at": s.created_at.isoformat() if s.created_at else None}
+
+    async def delete_signal(self, signal_id: int) -> bool:
+        query = select(Signal).where(Signal.id == signal_id)
+        if self.org_id:
+            query = query.where(Signal.org_id == self.org_id)
+        result = await self.db.execute(query)
+        s = result.scalar_one_or_none()
+        if not s:
+            return False
+        await self.db.delete(s)
+        return True
+
+    async def prioritize_signal(self, signal_id: int, prioritized: bool) -> dict | None:
+        query = select(Signal).where(Signal.id == signal_id)
+        if self.org_id:
+            query = query.where(Signal.org_id == self.org_id)
+        result = await self.db.execute(query)
+        s = result.scalar_one_or_none()
+        if not s:
+            return None
+        s.prioritized = 1 if prioritized else 0
+        await self.db.flush()
+        return {"id": s.id, "type": s.type.value, "source": s.source, "title": s.title,
+                "prioritized": s.prioritized}
 
     async def list_signals(self, limit: int = 30) -> list[dict]:
         if await self._should_use_df():
+            filter_str = f"org_id = {self.org_id}" if self.org_id else None
             return await df.db_query(DF_DB_SERVICE, "pressroom_signals",
-                                     order="created_at DESC", limit=limit)
+                                     filter_str=filter_str, order="created_at DESC", limit=limit)
 
-        result = await self.db.execute(select(Signal).order_by(Signal.created_at.desc()).limit(limit))
+        query = select(Signal).order_by(Signal.created_at.desc()).limit(limit)
+        if self.org_id:
+            query = query.where(Signal.org_id == self.org_id)
+        result = await self.db.execute(query)
         return [{"id": s.id, "type": s.type.value, "source": s.source, "title": s.title,
-                 "body": s.body, "url": s.url, "created_at": s.created_at.isoformat() if s.created_at else None}
+                 "body": s.body, "url": s.url, "prioritized": s.prioritized or 0,
+                 "created_at": s.created_at.isoformat() if s.created_at else None}
                 for s in result.scalars().all()]
 
     # ──────────────────────────────────────
@@ -98,16 +174,20 @@ class DataLayer:
 
     async def save_brief(self, data: dict) -> dict:
         if await self._should_use_df():
-            records = await df.db_create(DF_DB_SERVICE, "pressroom_briefs", [{
+            record = {
                 "date": data["date"],
                 "summary": data["summary"],
                 "angle": data.get("angle", ""),
                 "signal_ids": data.get("signal_ids", ""),
                 "created_at": datetime.datetime.utcnow().isoformat(),
-            }])
+            }
+            if self.org_id:
+                record["org_id"] = self.org_id
+            records = await df.db_create(DF_DB_SERVICE, "pressroom_briefs", [record])
             return records[0] if records else {}
 
         brief = Brief(
+            org_id=self.org_id,
             date=data["date"],
             summary=data["summary"],
             angle=data.get("angle", ""),
@@ -123,7 +203,7 @@ class DataLayer:
 
     async def save_content(self, data: dict) -> dict:
         if await self._should_use_df():
-            records = await df.db_create(DF_DB_SERVICE, "pressroom_content", [{
+            record = {
                 "signal_id": data.get("signal_id"),
                 "brief_id": data.get("brief_id"),
                 "channel": data["channel"] if isinstance(data["channel"], str) else data["channel"].value,
@@ -133,12 +213,17 @@ class DataLayer:
                 "body_raw": data.get("body_raw", ""),
                 "author": data.get("author", "company"),
                 "created_at": datetime.datetime.utcnow().isoformat(),
-            }])
+            }
+            if self.org_id:
+                record["org_id"] = self.org_id
+            records = await df.db_create(DF_DB_SERVICE, "pressroom_content", [record])
             return records[0] if records else {}
 
         content = Content(
+            org_id=self.org_id,
             signal_id=data.get("signal_id"),
             brief_id=data.get("brief_id"),
+            story_id=data.get("story_id"),
             channel=data["channel"] if isinstance(data["channel"], ContentChannel) else ContentChannel(data["channel"]),
             status=ContentStatus(data.get("status", "queued")),
             headline=data.get("headline", ""),
@@ -153,11 +238,18 @@ class DataLayer:
 
     async def list_content(self, status: str | None = None, limit: int = 50) -> list[dict]:
         if await self._should_use_df():
-            filter_str = f"status = '{status}'" if status else None
+            filters = []
+            if self.org_id:
+                filters.append(f"org_id = {self.org_id}")
+            if status:
+                filters.append(f"status = '{status}'")
+            filter_str = " AND ".join(filters) if filters else None
             return await df.db_query(DF_DB_SERVICE, "pressroom_content",
                                      filter_str=filter_str, order="created_at DESC", limit=limit)
 
         query = select(Content).order_by(Content.created_at.desc()).limit(limit)
+        if self.org_id:
+            query = query.where(Content.org_id == self.org_id)
         if status:
             query = query.where(Content.status == ContentStatus(status))
         result = await self.db.execute(query)
@@ -170,7 +262,10 @@ class DataLayer:
             except Exception:
                 return None
 
-        result = await self.db.execute(select(Content).where(Content.id == content_id))
+        query = select(Content).where(Content.id == content_id)
+        if self.org_id:
+            query = query.where(Content.org_id == self.org_id)
+        result = await self.db.execute(query)
         c = result.scalar_one_or_none()
         return _serialize_content(c) if c else None
 
@@ -185,7 +280,10 @@ class DataLayer:
             records = await df.db_update(DF_DB_SERVICE, "pressroom_content", [update])
             return records[0] if records else {}
 
-        result = await self.db.execute(select(Content).where(Content.id == content_id))
+        query = select(Content).where(Content.id == content_id)
+        if self.org_id:
+            query = query.where(Content.org_id == self.org_id)
+        result = await self.db.execute(query)
         c = result.scalar_one_or_none()
         if not c:
             return {}
@@ -194,21 +292,92 @@ class DataLayer:
             c.approved_at = datetime.datetime.utcnow()
         if status == "published":
             c.published_at = datetime.datetime.utcnow()
+        # Apply extra fields (e.g. headline, body, body_raw from regenerate)
+        for field, value in extra.items():
+            if hasattr(c, field):
+                setattr(c, field, value)
         await self.db.flush()
         return _serialize_content(c)
 
     async def get_approved_unpublished(self) -> list[dict]:
         if await self._should_use_df():
+            filters = ["status = 'approved'", "published_at IS NULL"]
+            if self.org_id:
+                filters.insert(0, f"org_id = {self.org_id}")
             return await df.db_query(
                 DF_DB_SERVICE, "pressroom_content",
-                filter_str="status = 'approved' AND published_at IS NULL",
+                filter_str=" AND ".join(filters),
                 order="created_at DESC",
             )
 
-        result = await self.db.execute(
-            select(Content).where(Content.status == ContentStatus.approved, Content.published_at.is_(None))
-        )
+        query = select(Content).where(Content.status == ContentStatus.approved, Content.published_at.is_(None))
+        if self.org_id:
+            query = query.where(Content.org_id == self.org_id)
+        result = await self.db.execute(query)
         return [_serialize_content(c) for c in result.scalars().all()]
+
+    # ──────────────────────────────────────
+    # Settings (org-scoped)
+    # ──────────────────────────────────────
+
+    async def get_setting(self, key: str) -> str | None:
+        query = select(Setting).where(Setting.key == key)
+        if self.org_id:
+            query = query.where(Setting.org_id == self.org_id)
+        else:
+            query = query.where(Setting.org_id.is_(None))
+        result = await self.db.execute(query)
+        s = result.scalar_one_or_none()
+        return s.value if s else None
+
+    async def set_setting(self, key: str, value: str):
+        query = select(Setting).where(Setting.key == key)
+        if self.org_id:
+            query = query.where(Setting.org_id == self.org_id)
+        else:
+            query = query.where(Setting.org_id.is_(None))
+        result = await self.db.execute(query)
+        existing = result.scalar_one_or_none()
+        if existing:
+            existing.value = value
+        else:
+            self.db.add(Setting(org_id=self.org_id, key=key, value=value))
+
+    # ── Account-level settings (org_id=NULL, shared across all companies) ──
+
+    async def get_account_setting(self, key: str) -> str | None:
+        """Get an account-level setting (org_id=NULL), regardless of current org context."""
+        query = select(Setting).where(Setting.key == key, Setting.org_id.is_(None))
+        result = await self.db.execute(query)
+        s = result.scalar_one_or_none()
+        return s.value if s else None
+
+    async def set_account_setting(self, key: str, value: str):
+        """Save an account-level setting (org_id=NULL), regardless of current org context."""
+        query = select(Setting).where(Setting.key == key, Setting.org_id.is_(None))
+        result = await self.db.execute(query)
+        existing = result.scalar_one_or_none()
+        if existing:
+            existing.value = value
+        else:
+            self.db.add(Setting(org_id=None, key=key, value=value))
+
+    async def get_account_settings(self) -> dict[str, str]:
+        """Get all account-level settings (org_id=NULL)."""
+        query = select(Setting).where(Setting.org_id.is_(None))
+        result = await self.db.execute(query)
+        return {s.key: s.value for s in result.scalars().all()}
+
+    async def get_all_settings(self) -> dict[str, str]:
+        """Get merged settings — account-level (org_id=NULL) + org-level.
+        Org settings override account settings on conflicts."""
+        account = await self.get_account_settings()
+        if not self.org_id:
+            return account
+        query = select(Setting).where(Setting.org_id == self.org_id)
+        result = await self.db.execute(query)
+        org_settings = {s.key: s.value for s in result.scalars().all()}
+        return {**account, **org_settings}
 
     # ──────────────────────────────────────
     # Memory queries (for the engine flywheel)
@@ -217,49 +386,61 @@ class DataLayer:
     async def get_approved_by_channel(self, channel: str, limit: int = 5) -> list[dict]:
         """Get recent approved content for a channel — few-shot examples for the engine."""
         if await self._should_use_df():
+            filters = [f"channel = '{channel}'", "status = 'approved'"]
+            if self.org_id:
+                filters.insert(0, f"org_id = {self.org_id}")
             return await df.db_query(
                 DF_DB_SERVICE, "pressroom_content",
-                filter_str=f"channel = '{channel}' AND status = 'approved'",
+                filter_str=" AND ".join(filters),
                 order="approved_at DESC", limit=limit,
             )
 
-        result = await self.db.execute(
-            select(Content)
-            .where(Content.channel == ContentChannel(channel), Content.status == ContentStatus.approved)
-            .order_by(Content.approved_at.desc()).limit(limit)
-        )
+        query = (select(Content)
+                 .where(Content.channel == ContentChannel(channel), Content.status == ContentStatus.approved)
+                 .order_by(Content.approved_at.desc()).limit(limit))
+        if self.org_id:
+            query = query.where(Content.org_id == self.org_id)
+        result = await self.db.execute(query)
         return [_serialize_content(c) for c in result.scalars().all()]
 
     async def get_spiked_by_channel(self, channel: str, limit: int = 5) -> list[dict]:
         """Get recently spiked content — what NOT to generate."""
         if await self._should_use_df():
+            filters = [f"channel = '{channel}'", "status = 'spiked'"]
+            if self.org_id:
+                filters.insert(0, f"org_id = {self.org_id}")
             return await df.db_query(
                 DF_DB_SERVICE, "pressroom_content",
-                filter_str=f"channel = '{channel}' AND status = 'spiked'",
+                filter_str=" AND ".join(filters),
                 order="created_at DESC", limit=limit,
             )
 
-        result = await self.db.execute(
-            select(Content)
-            .where(Content.channel == ContentChannel(channel), Content.status == ContentStatus.spiked)
-            .order_by(Content.created_at.desc()).limit(limit)
-        )
+        query = (select(Content)
+                 .where(Content.channel == ContentChannel(channel), Content.status == ContentStatus.spiked)
+                 .order_by(Content.created_at.desc()).limit(limit))
+        if self.org_id:
+            query = query.where(Content.org_id == self.org_id)
+        result = await self.db.execute(query)
         return [_serialize_content(c) for c in result.scalars().all()]
 
     async def get_recent_topics(self, days: int = 21) -> list[dict]:
         """What angles/headlines have been covered recently — topic fatigue check."""
         cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
         if await self._should_use_df():
+            filters = [f"created_at > '{cutoff}'"]
+            if self.org_id:
+                filters.insert(0, f"org_id = {self.org_id}")
             return await df.db_query(
                 DF_DB_SERVICE, "pressroom_content",
-                filter_str=f"created_at > '{cutoff}'",
+                filter_str=" AND ".join(filters),
                 order="created_at DESC", limit=100,
             )
 
         cutoff_dt = datetime.datetime.utcnow() - datetime.timedelta(days=days)
-        result = await self.db.execute(
-            select(Content).where(Content.created_at > cutoff_dt).order_by(Content.created_at.desc()).limit(100)
-        )
+        query = select(Content).where(Content.created_at > cutoff_dt).order_by(Content.created_at.desc()).limit(100)
+        if self.org_id:
+            query = query.where(Content.org_id == self.org_id)
+        result = await self.db.execute(query)
         return [{"headline": c.headline, "channel": c.channel.value, "status": c.status.value}
                 for c in result.scalars().all()]
 
@@ -269,9 +450,9 @@ class DataLayer:
 
     async def get_memory_context(self) -> dict:
         """Gather the full memory context for the engine — approved examples,
-        spiked anti-patterns, recent topics per channel, and DF intelligence. This is the flywheel."""
+        spiked anti-patterns, recent topics per channel, DF intelligence, and data sources."""
         channels = ["linkedin", "x_thread", "blog", "release_email", "newsletter"]
-        memory = {"approved": {}, "spiked": {}, "recent_topics": [], "df_intelligence": {}}
+        memory = {"approved": {}, "spiked": {}, "recent_topics": [], "df_intelligence": {}, "datasources": []}
         for ch in channels:
             memory["approved"][ch] = await self.get_approved_by_channel(ch, limit=3)
             memory["spiked"][ch] = await self.get_spiked_by_channel(ch, limit=3)
@@ -280,24 +461,33 @@ class DataLayer:
         # Pull DF intelligence if service map exists
         memory["df_intelligence"] = await self.get_df_intelligence()
 
+        # Include DataSource records as additional context
+        memory["datasources"] = await self.list_datasources()
+
         return memory
 
-    async def get_df_intelligence(self) -> dict:
-        """Query DF intelligence sources based on the stored service map.
+    async def list_datasources(self) -> list[dict]:
+        """List DataSource records for the current org."""
+        query = select(DataSource).order_by(DataSource.created_at.desc())
+        if self.org_id:
+            query = query.where(DataSource.org_id == self.org_id)
+        result = await self.db.execute(query)
+        return [{"id": ds.id, "name": ds.name, "description": ds.description,
+                 "category": ds.category, "connection_type": ds.connection_type,
+                 "base_url": ds.base_url}
+                for ds in result.scalars().all()]
 
-        Reads the service map from settings, finds intelligence sources,
-        queries their useful tables, and returns summarized data for the engine."""
+    async def get_df_intelligence(self) -> dict:
+        """Query DF intelligence sources based on the stored service map."""
         if not df.available:
             return {}
 
-        # Get service map from settings
-        result = await self.db.execute(select(Setting).where(Setting.key == "df_service_map"))
-        setting = result.scalar_one_or_none()
-        if not setting or not setting.value:
+        svc_map_value = await self.get_setting("df_service_map")
+        if not svc_map_value:
             return {}
 
         try:
-            service_map_data = json.loads(setting.value)
+            service_map_data = json.loads(svc_map_value)
         except json.JSONDecodeError:
             return {}
 
@@ -319,7 +509,6 @@ class DataLayer:
                 try:
                     rows = await df.db_query(svc_name, table, order="id DESC", limit=10)
                     if rows:
-                        # Summarize — just grab key fields, truncate values
                         summarized = []
                         for row in rows:
                             summary = {}
@@ -345,9 +534,202 @@ class DataLayer:
             "voice_email_style", "voice_newsletter_style", "voice_yt_style",
             "onboard_company_name", "onboard_industry", "onboard_topics", "onboard_competitors",
         ]
-        result = await self.db.execute(select(Setting).where(Setting.key.in_(voice_keys)))
-        settings = {s.key: s.value for s in result.scalars().all()}
-        return settings
+        query = select(Setting).where(Setting.key.in_(voice_keys))
+        if self.org_id:
+            query = query.where(Setting.org_id == self.org_id)
+        else:
+            query = query.where(Setting.org_id.is_(None))
+        result = await self.db.execute(query)
+        return {s.key: s.value for s in result.scalars().all()}
+
+    # ──────────────────────────────────────
+    # Company Assets
+    # ──────────────────────────────────────
+
+    async def save_asset(self, data: dict) -> dict:
+        asset = CompanyAsset(
+            org_id=self.org_id,
+            asset_type=data["asset_type"],
+            url=data["url"],
+            label=data.get("label", ""),
+            description=data.get("description", ""),
+            discovered_via=data.get("discovered_via", "manual"),
+            auto_discovered=1 if data.get("auto_discovered") else 0,
+            metadata_json=json.dumps(data.get("metadata", {})) if isinstance(data.get("metadata"), dict) else data.get("metadata_json", "{}"),
+        )
+        self.db.add(asset)
+        await self.db.flush()
+        return _serialize_asset(asset)
+
+    async def list_assets(self, asset_type: str | None = None) -> list[dict]:
+        query = select(CompanyAsset).order_by(CompanyAsset.asset_type, CompanyAsset.created_at.desc())
+        if self.org_id:
+            query = query.where(CompanyAsset.org_id == self.org_id)
+        if asset_type:
+            query = query.where(CompanyAsset.asset_type == asset_type)
+        result = await self.db.execute(query)
+        return [_serialize_asset(a) for a in result.scalars().all()]
+
+    async def update_asset(self, asset_id: int, **fields) -> dict | None:
+        query = select(CompanyAsset).where(CompanyAsset.id == asset_id)
+        if self.org_id:
+            query = query.where(CompanyAsset.org_id == self.org_id)
+        result = await self.db.execute(query)
+        a = result.scalar_one_or_none()
+        if not a:
+            return None
+        for field, value in fields.items():
+            if hasattr(a, field):
+                setattr(a, field, value)
+        await self.db.flush()
+        return _serialize_asset(a)
+
+    async def delete_asset(self, asset_id: int) -> bool:
+        query = select(CompanyAsset).where(CompanyAsset.id == asset_id)
+        if self.org_id:
+            query = query.where(CompanyAsset.org_id == self.org_id)
+        result = await self.db.execute(query)
+        a = result.scalar_one_or_none()
+        if not a:
+            return False
+        await self.db.delete(a)
+        return True
+
+    # ──────────────────────────────────────
+    # Stories
+    # ──────────────────────────────────────
+
+    async def create_story(self, data: dict) -> dict:
+        story = Story(
+            org_id=self.org_id,
+            title=data.get("title", "Untitled Story"),
+            angle=data.get("angle", ""),
+            editorial_notes=data.get("editorial_notes", ""),
+            status=StoryStatus(data.get("status", "draft")),
+        )
+        self.db.add(story)
+        await self.db.flush()
+        return _serialize_story(story)
+
+    async def get_story(self, story_id: int) -> dict | None:
+        query = select(Story).where(Story.id == story_id)
+        if self.org_id:
+            query = query.where(Story.org_id == self.org_id)
+        result = await self.db.execute(query)
+        story = result.scalar_one_or_none()
+        if not story:
+            return None
+        # Load associated signals via join
+        sq = (select(StorySignal, Signal)
+              .join(Signal, StorySignal.signal_id == Signal.id)
+              .where(StorySignal.story_id == story_id)
+              .order_by(StorySignal.sort_order))
+        sig_result = await self.db.execute(sq)
+        signals_data = []
+        for ss, sig in sig_result.all():
+            signals_data.append({
+                "story_signal_id": ss.id,
+                "signal_id": sig.id,
+                "editor_notes": ss.editor_notes,
+                "sort_order": ss.sort_order,
+                "signal": {
+                    "id": sig.id, "type": sig.type.value, "source": sig.source,
+                    "title": sig.title, "body": sig.body, "url": sig.url,
+                    "prioritized": sig.prioritized or 0,
+                },
+            })
+        d = _serialize_story(story)
+        d["signals"] = signals_data
+        return d
+
+    async def list_stories(self, limit: int = 20) -> list[dict]:
+        query = select(Story).order_by(Story.created_at.desc()).limit(limit)
+        if self.org_id:
+            query = query.where(Story.org_id == self.org_id)
+        result = await self.db.execute(query)
+        stories = []
+        for s in result.scalars().all():
+            d = _serialize_story(s)
+            # Count signals
+            count_q = select(StorySignal).where(StorySignal.story_id == s.id)
+            count_r = await self.db.execute(count_q)
+            d["signal_count"] = len(count_r.scalars().all())
+            stories.append(d)
+        return stories
+
+    async def update_story(self, story_id: int, **fields) -> dict | None:
+        query = select(Story).where(Story.id == story_id)
+        if self.org_id:
+            query = query.where(Story.org_id == self.org_id)
+        result = await self.db.execute(query)
+        story = result.scalar_one_or_none()
+        if not story:
+            return None
+        for field, value in fields.items():
+            if field == "status":
+                value = StoryStatus(value)
+            if hasattr(story, field):
+                setattr(story, field, value)
+        await self.db.flush()
+        return _serialize_story(story)
+
+    async def delete_story(self, story_id: int) -> bool:
+        query = select(Story).where(Story.id == story_id)
+        if self.org_id:
+            query = query.where(Story.org_id == self.org_id)
+        result = await self.db.execute(query)
+        story = result.scalar_one_or_none()
+        if not story:
+            return False
+        await self.db.delete(story)
+        return True
+
+    async def add_signal_to_story(self, story_id: int, signal_id: int, editor_notes: str = "") -> dict | None:
+        # Get max sort_order
+        existing = await self.db.execute(
+            select(StorySignal).where(StorySignal.story_id == story_id)
+            .order_by(StorySignal.sort_order.desc()).limit(1)
+        )
+        last = existing.scalar_one_or_none()
+        next_order = (last.sort_order + 1) if last else 0
+        ss = StorySignal(story_id=story_id, signal_id=signal_id,
+                         editor_notes=editor_notes, sort_order=next_order)
+        self.db.add(ss)
+        await self.db.flush()
+        return {"id": ss.id, "story_id": story_id, "signal_id": signal_id,
+                "editor_notes": editor_notes, "sort_order": ss.sort_order}
+
+    async def remove_signal_from_story(self, story_signal_id: int) -> bool:
+        result = await self.db.execute(
+            select(StorySignal).where(StorySignal.id == story_signal_id))
+        ss = result.scalar_one_or_none()
+        if not ss:
+            return False
+        await self.db.delete(ss)
+        return True
+
+    async def update_story_signal_notes(self, story_signal_id: int, editor_notes: str) -> dict | None:
+        result = await self.db.execute(
+            select(StorySignal).where(StorySignal.id == story_signal_id))
+        ss = result.scalar_one_or_none()
+        if not ss:
+            return None
+        ss.editor_notes = editor_notes
+        await self.db.flush()
+        return {"id": ss.id, "editor_notes": ss.editor_notes}
+
+    async def update_signal_body(self, signal_id: int, body: str) -> dict | None:
+        query = select(Signal).where(Signal.id == signal_id)
+        if self.org_id:
+            query = query.where(Signal.org_id == self.org_id)
+        result = await self.db.execute(query)
+        s = result.scalar_one_or_none()
+        if not s:
+            return None
+        s.body = body
+        await self.db.flush()
+        return {"id": s.id, "type": s.type.value, "source": s.source, "title": s.title,
+                "body": s.body, "url": s.url, "prioritized": s.prioritized or 0}
 
     async def commit(self):
         await self.db.commit()
@@ -355,11 +737,31 @@ class DataLayer:
 
 def _serialize_content(c: Content) -> dict:
     return {
-        "id": c.id, "signal_id": c.signal_id, "brief_id": c.brief_id,
+        "id": c.id, "org_id": c.org_id, "signal_id": c.signal_id,
+        "brief_id": c.brief_id, "story_id": getattr(c, "story_id", None),
         "channel": c.channel.value, "status": c.status.value,
         "headline": c.headline, "body": c.body, "body_raw": c.body_raw,
         "author": c.author,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "approved_at": c.approved_at.isoformat() if c.approved_at else None,
         "published_at": c.published_at.isoformat() if c.published_at else None,
+    }
+
+
+def _serialize_asset(a: CompanyAsset) -> dict:
+    return {
+        "id": a.id, "org_id": a.org_id, "asset_type": a.asset_type,
+        "url": a.url, "label": a.label, "description": a.description,
+        "discovered_via": a.discovered_via, "auto_discovered": bool(a.auto_discovered),
+        "metadata": json.loads(a.metadata_json) if a.metadata_json else {},
+        "created_at": a.created_at.isoformat() if a.created_at else None,
+    }
+
+
+def _serialize_story(s: Story) -> dict:
+    return {
+        "id": s.id, "org_id": s.org_id, "title": s.title,
+        "angle": s.angle, "editorial_notes": s.editorial_notes,
+        "status": s.status.value,
+        "created_at": s.created_at.isoformat() if s.created_at else None,
     }

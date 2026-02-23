@@ -2,6 +2,12 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 
 const API = '/api'
 
+function orgHeaders(orgId) {
+  const h = { 'Content-Type': 'application/json' }
+  if (orgId) h['X-Org-Id'] = String(orgId)
+  return h
+}
+
 const TARGETS = [
   {
     id: 'signals',
@@ -23,7 +29,7 @@ const TARGETS = [
   },
 ]
 
-export default function Import({ onLog }) {
+export default function Import({ onLog, orgId }) {
   const [target, setTarget] = useState('signals')
   const [format, setFormat] = useState('json')
   const [pasteData, setPasteData] = useState('')
@@ -31,6 +37,11 @@ export default function Import({ onLog }) {
   const [importing, setImporting] = useState(false)
   const [lastResult, setLastResult] = useState(null)
   const fileRef = useRef(null)
+
+  // Blog scraper state
+  const [blogUrl, setBlogUrl] = useState('')
+  const [scraping, setScraping] = useState(false)
+  const [scrapeResult, setScrapeResult] = useState(null)
 
   const loadTemplates = useCallback(async () => {
     try {
@@ -60,6 +71,35 @@ export default function Import({ onLog }) {
     }
   }
 
+  const scrapeBlog = async () => {
+    if (!blogUrl.trim()) return
+    setScraping(true)
+    setScrapeResult(null)
+    onLog?.(`SCRAPE BLOG — ${blogUrl}...`, 'action')
+    try {
+      const res = await fetch(`${API}/import/blog`, {
+        method: 'POST',
+        headers: orgHeaders(orgId),
+        body: JSON.stringify({ url: blogUrl, max_posts: 20 }),
+      })
+      const data = await res.json()
+      setScrapeResult(data)
+      if (data.error) {
+        onLog?.(`SCRAPE FAILED — ${data.error}`, 'error')
+      } else {
+        onLog?.(`BLOG IMPORTED — ${data.imported} posts from ${blogUrl}`, 'success')
+        if (data.posts) {
+          data.posts.forEach(p => onLog?.(`  ${p.title}`, 'detail'))
+        }
+      }
+    } catch (e) {
+      onLog?.(`SCRAPE ERROR — ${e.message}`, 'error')
+      setScrapeResult({ error: e.message })
+    } finally {
+      setScraping(false)
+    }
+  }
+
   const importPaste = async () => {
     if (!pasteData.trim()) return
     setImporting(true)
@@ -68,7 +108,7 @@ export default function Import({ onLog }) {
     try {
       const res = await fetch(`${API}/import/paste`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: orgHeaders(orgId),
         body: JSON.stringify({ target, format, data: pasteData }),
       })
       const data = await res.json()
@@ -123,9 +163,46 @@ export default function Import({ onLog }) {
         <h2 className="settings-title">Import Data</h2>
       </div>
 
+      {/* BLOG SCRAPER */}
+      <div className="settings-section">
+        <div className="section-label">Blog Scraper</div>
+        <p className="voice-hint">
+          Point at a blog URL to import past posts. The engine uses these to avoid topic repetition
+          and learn your existing content patterns.
+        </p>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            className="setting-input"
+            style={{ flex: 1 }}
+            value={blogUrl}
+            onChange={e => setBlogUrl(e.target.value)}
+            placeholder="https://blog.example.com or https://example.com/blog"
+            onKeyDown={e => { if (e.key === 'Enter') scrapeBlog() }}
+            spellCheck={false}
+          />
+          <button
+            className={`btn btn-run ${scraping ? 'loading' : ''}`}
+            onClick={scrapeBlog}
+            disabled={scraping || !blogUrl.trim()}
+          >
+            {scraping ? 'Scraping...' : 'Scrape Blog'}
+          </button>
+        </div>
+        {scrapeResult && !scrapeResult.error && (
+          <div style={{ color: 'var(--green)', fontSize: 12, marginTop: 8 }}>
+            Imported {scrapeResult.imported} posts from {scrapeResult.source_url}
+          </div>
+        )}
+        {scrapeResult?.error && (
+          <div style={{ color: 'var(--red)', fontSize: 12, marginTop: 8 }}>
+            {scrapeResult.error}
+          </div>
+        )}
+      </div>
+
       {/* TARGET SELECTOR */}
       <div className="settings-section">
-        <div className="section-label">Import Target</div>
+        <div className="section-label">Manual Import</div>
         <div className="import-targets">
           {TARGETS.map(t => (
             <button

@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     df_base_url: str = "http://localhost:8080"
     df_api_key: str = ""
     github_webhook_secret: str = ""
+    # Social OAuth (Pressroom-owned apps)
+    linkedin_client_id: str = ""
+    linkedin_client_secret: str = ""
+    facebook_app_id: str = ""
+    facebook_app_secret: str = ""
 
     class Config:
         env_file = ".env"

@@ -25,13 +25,6 @@ export default function Onboard({ onLog, onComplete }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
-  // Check if already onboarded
-  useEffect(() => {
-    fetch(`${API}/onboard/status`).then(r => r.json()).then(data => {
-      if (data.complete) onComplete?.()
-    }).catch(() => {})
-  }, [onComplete])
-
   const currentStepIdx = STEPS.findIndex(s => s.id === step)
 
   // ─── STEP 1: CRAWL ───
@@ -57,7 +50,12 @@ export default function Onboard({ onLog, onComplete }) {
       })
       const data = await res.json()
       setCrawlData(data)
-      onLog?.(`CRAWL COMPLETE — found ${data.pages_found?.length || 0} pages: ${data.pages_found?.join(', ')}`, 'success')
+      const socialCount = Object.keys(data.social_profiles || {}).length
+      const socialNote = socialCount ? ` + ${socialCount} social profiles` : ''
+      onLog?.(`CRAWL COMPLETE — found ${data.pages_found?.length || 0} pages${socialNote}: ${data.pages_found?.join(', ')}`, 'success')
+      if (socialCount) {
+        onLog?.(`SOCIALS — ${Object.entries(data.social_profiles).map(([p,u]) => `${p}`).join(', ')}`, 'detail')
+      }
 
       // Auto-synthesize profile
       onLog?.('PROFILE — Claude is analyzing your brand...', 'action')
@@ -67,8 +65,12 @@ export default function Onboard({ onLog, onComplete }) {
         body: JSON.stringify({ crawl_data: data }),
       })
       if (!profRes.ok) {
-        const errText = await profRes.text()
-        throw new Error(`Profile API error: ${profRes.status} ${errText.slice(0, 100)}`)
+        let errMsg = `Profile API error: ${profRes.status}`
+        try {
+          const errData = await profRes.json()
+          errMsg = errData.error || errMsg
+        } catch { /* not JSON */ }
+        throw new Error(errMsg)
       }
       const profData = await profRes.json()
       if (profData.profile && !profData.profile.error) {
@@ -76,8 +78,12 @@ export default function Onboard({ onLog, onComplete }) {
         onLog?.(`PROFILE READY — ${profData.profile.company_name || 'Company'} voice synthesized`, 'success')
         setStep('profile')
       } else {
-        setError(profData.profile?.error || 'Profile synthesis failed')
-        onLog?.(`PROFILE FAILED — ${profData.profile?.error || 'unknown error'}`, 'error')
+        const errMsg = profData.profile?.error || 'Profile synthesis failed'
+        setError(errMsg)
+        onLog?.(`PROFILE FAILED — ${errMsg}`, 'error')
+        if (profData.profile?.raw) {
+          onLog?.(`RAW RESPONSE — ${profData.profile.raw.slice(0, 300)}`, 'detail')
+        }
       }
     } catch (e) {
       setError(e.message)
@@ -159,17 +165,21 @@ export default function Onboard({ onLog, onComplete }) {
     setError(null)
     onLog?.('APPLY — saving your profile and service map...', 'action')
     try {
-      await fetch(`${API}/onboard/apply`, {
+      const res = await fetch(`${API}/onboard/apply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          profile: profile || {},
+          profile: { ...(profile || {}), domain: domain || '' },
           service_map: classification?.service_map || null,
+          crawl_pages: crawlData?.pages || null,
         }),
       })
+      const data = await res.json()
       onLog?.('PROFILE SAVED — Pressroom is configured', 'success')
       onLog?.('ONBOARDING COMPLETE — head to the desk to start generating', 'success')
-      onComplete?.()
+      // Pass back the new org so App can switch to it
+      const newOrg = data.org || { id: data.org_id, name: profile?.company_name || 'Company', domain: domain || '' }
+      onComplete?.(newOrg)
     } catch (e) {
       setError(e.message)
       onLog?.(`APPLY ERROR — ${e.message}`, 'error')
@@ -283,6 +293,25 @@ export default function Onboard({ onLog, onComplete }) {
                 <ProfileField label="X / Twitter" value={profile.x_style || ''} onChange={v => editProfile('x_style', v)} />
                 <ProfileField label="Blog" value={profile.blog_style || ''} onChange={v => editProfile('blog_style', v)} />
               </div>
+
+              {profile.social_profiles && Object.values(profile.social_profiles).some(v => v && v !== 'null') && (
+                <div className="settings-section" style={{ marginTop: 20 }}>
+                  <div className="section-label">Social Profiles</div>
+                  {Object.entries(profile.social_profiles).map(([platform, url]) => (
+                    url && url !== 'null' ? (
+                      <ProfileField
+                        key={platform}
+                        label={platform.charAt(0).toUpperCase() + platform.slice(1)}
+                        value={url}
+                        onChange={v => setProfile(prev => ({
+                          ...prev,
+                          social_profiles: { ...prev.social_profiles, [platform]: v }
+                        }))}
+                      />
+                    ) : null
+                  ))}
+                </div>
+              )}
             </div>
           ) : (
             <div className="onboard-profile">

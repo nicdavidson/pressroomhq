@@ -1,14 +1,19 @@
-"""Onboarding API — domain crawl, profile synthesis, DF classification, apply."""
+"""Onboarding API — domain crawl, profile synthesis, DF classification, apply.
+
+Creates an Organization and scopes all settings to it.
+"""
 
 import json
+import anthropic
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db
-from models import Setting
-from services.onboarding import crawl_domain, synthesize_profile, classify_df_services, profile_to_settings
+from database import get_data_layer
+from services.data_layer import DataLayer
+from config import settings
+from services.onboarding import crawl_domain, synthesize_profile, classify_df_services, profile_to_settings, generate_scout_sources
+from services.scout import discover_github_repos
 from services.df_client import df
 
 router = APIRouter(prefix="/api/onboard", tags=["onboard"])
@@ -29,6 +34,7 @@ class ProfileRequest(BaseModel):
 class ApplyProfileRequest(BaseModel):
     profile: dict
     service_map: dict | None = None
+    crawl_pages: dict | None = None  # {label: {url, text}} from crawl step
 
 class ClassifyRequest(BaseModel):
     """Optionally pass pre-fetched service data; otherwise we discover live."""
@@ -62,7 +68,17 @@ async def onboard_profile(req: ProfileRequest):
     if not crawl_data:
         return {"error": "Need crawl_data or domain"}
 
-    profile = await synthesize_profile(crawl_data, req.extra_context)
+    try:
+        profile = await synthesize_profile(crawl_data, req.extra_context)
+    except anthropic.AuthenticationError:
+        return JSONResponse(status_code=401, content={
+            "error": "Invalid Anthropic API key. Check your key in Settings and try again."
+        })
+    except anthropic.APIError as e:
+        return JSONResponse(status_code=502, content={
+            "error": f"Anthropic API error: {e.message}"
+        })
+
     return {"profile": profile, "crawl": crawl_data}
 
 
@@ -76,10 +92,8 @@ async def onboard_df_classify():
         return {"available": False, "error": "DreamFactory not configured. Set df_base_url and df_api_key first."}
 
     try:
-        # Introspect all DB services (schemas + sample data)
         db_services = await df.introspect_all_db_services()
 
-        # Get social services with auth status
         social_services = await df.discover_social_services()
         for svc in social_services:
             try:
@@ -87,7 +101,6 @@ async def onboard_df_classify():
             except Exception:
                 svc["auth_status"] = {"connected": False}
 
-        # Claude classifies everything
         classification = await classify_df_services(db_services, social_services)
 
         return {
@@ -101,19 +114,28 @@ async def onboard_df_classify():
 
 
 @router.post("/apply")
-async def onboard_apply(req: ApplyProfileRequest, db: AsyncSession = Depends(get_db)):
-    """Step 4: Apply the reviewed profile as settings + store service map."""
+async def onboard_apply(req: ApplyProfileRequest, dl: DataLayer = Depends(get_data_layer)):
+    """Step 4: Apply the reviewed profile as settings.
+
+    If no org_id in header, creates a new Organization first.
+    All settings are scoped to the org.
+    """
+    # Create org if this is a new onboard (no org_id set)
+    org_id = dl.org_id
+    org = None
+    if not org_id:
+        company_name = req.profile.get("company_name", "New Company")
+        domain = req.profile.get("domain", "")
+        org = await dl.create_org(name=company_name, domain=domain)
+        org_id = org["id"]
+        dl.org_id = org_id  # scope all subsequent writes to this org
+
     applied = []
 
     # Convert profile to settings and save
     settings_map = profile_to_settings(req.profile)
     for key, value in settings_map.items():
-        result = await db.execute(select(Setting).where(Setting.key == key))
-        existing = result.scalar_one_or_none()
-        if existing:
-            existing.value = value
-        else:
-            db.add(Setting(key=key, value=value))
+        await dl.set_setting(key, value)
         applied.append(key)
 
     # Store company metadata that doesn't map to voice settings
@@ -127,48 +149,144 @@ async def onboard_apply(req: ApplyProfileRequest, db: AsyncSession = Depends(get
         val = req.profile.get(profile_key)
         if val:
             str_val = json.dumps(val) if isinstance(val, (list, dict)) else str(val)
-            result = await db.execute(select(Setting).where(Setting.key == setting_key))
-            existing = result.scalar_one_or_none()
-            if existing:
-                existing.value = str_val
-            else:
-                db.add(Setting(key=setting_key, value=str_val))
+            await dl.set_setting(setting_key, str_val)
             applied.append(setting_key)
+
+    # Store social profiles
+    socials = req.profile.get("social_profiles")
+    if socials and isinstance(socials, dict):
+        await dl.set_setting("social_profiles", json.dumps(socials))
+        applied.append("social_profiles")
 
     # Store DF service map if provided
     if req.service_map:
-        result = await db.execute(select(Setting).where(Setting.key == "df_service_map"))
-        existing = result.scalar_one_or_none()
-        map_json = json.dumps(req.service_map)
-        if existing:
-            existing.value = map_json
-        else:
-            db.add(Setting(key="df_service_map", value=map_json))
+        await dl.set_setting("df_service_map", json.dumps(req.service_map))
         applied.append("df_service_map")
 
+    # Generate smart scout sources from the profile
+    try:
+        scout_sources = await generate_scout_sources(req.profile)
+        if scout_sources:
+            if scout_sources.get("subreddits"):
+                await dl.set_setting("scout_subreddits", json.dumps(scout_sources["subreddits"]))
+                applied.append("scout_subreddits")
+            if scout_sources.get("hn_keywords"):
+                await dl.set_setting("scout_hn_keywords", json.dumps(scout_sources["hn_keywords"]))
+                applied.append("scout_hn_keywords")
+            if scout_sources.get("rss_feeds"):
+                await dl.set_setting("scout_rss_feeds", json.dumps(scout_sources["rss_feeds"]))
+                applied.append("scout_rss_feeds")
+    except Exception:
+        pass  # Non-fatal — scout sources are nice to have
+
+    # Discover GitHub repos from social profile (way better than LLM guessing)
+    try:
+        github_url = ""
+        if socials and isinstance(socials, dict):
+            github_url = socials.get("github", "")
+        if not github_url:
+            # Check if LLM-generated scout sources had any repos
+            github_url = ""
+
+        if github_url:
+            gh_token = settings.github_token
+            discovered_repos = await discover_github_repos(github_url, gh_token=gh_token)
+            if discovered_repos:
+                await dl.set_setting("scout_github_repos", json.dumps(discovered_repos))
+                applied.append("scout_github_repos")
+        elif scout_sources and scout_sources.get("github_repos"):
+            # Fallback to LLM-guessed repos if no GitHub social profile
+            await dl.set_setting("scout_github_repos", json.dumps(scout_sources["github_repos"]))
+            applied.append("scout_github_repos")
+    except Exception:
+        pass  # Non-fatal
+
+    # ── Persist discovered assets as CompanyAsset records ──
+    asset_count = 0
+
+    # Crawl pages → assets (blog, docs, subdomains, etc.)
+    crawl_pages = req.crawl_pages or {}
+    for label, page_data in crawl_pages.items():
+        url = page_data.get("url", "") if isinstance(page_data, dict) else str(page_data)
+        if not url:
+            continue
+        # Map crawl labels to asset types
+        if label.startswith("sub:"):
+            asset_type = "subdomain"
+            asset_label = label.removeprefix("sub:")
+        elif label in ("blog", "news", "articles"):
+            asset_type = "blog"
+            asset_label = label
+        elif label in ("docs", "documentation", "api", "reference", "guides"):
+            asset_type = "docs"
+            asset_label = label
+        elif label in ("product", "features", "platform", "solutions"):
+            asset_type = "product"
+            asset_label = label
+        else:
+            asset_type = "page"
+            asset_label = label
+        await dl.save_asset({
+            "asset_type": asset_type,
+            "url": url,
+            "label": asset_label,
+            "description": "",
+            "discovered_via": "onboarding",
+            "auto_discovered": 1,
+        })
+        asset_count += 1
+
+    # Social profiles → assets
+    if socials and isinstance(socials, dict):
+        for platform, url in socials.items():
+            if url:
+                await dl.save_asset({
+                    "asset_type": "social",
+                    "url": url,
+                    "label": platform,
+                    "description": f"{platform} profile",
+                    "discovered_via": "onboarding",
+                    "auto_discovered": 1,
+                })
+                asset_count += 1
+
+    # GitHub repos → assets (if discovered)
+    try:
+        repos_json = await dl.get_setting("scout_github_repos")
+        if repos_json:
+            repos = json.loads(repos_json)
+            for repo in (repos if isinstance(repos, list) else []):
+                repo_name = repo if isinstance(repo, str) else repo.get("full_name", repo.get("name", ""))
+                if repo_name:
+                    await dl.save_asset({
+                        "asset_type": "repo",
+                        "url": f"https://github.com/{repo_name}" if "/" in repo_name else repo_name,
+                        "label": repo_name.split("/")[-1] if "/" in repo_name else repo_name,
+                        "description": repo.get("description", "") if isinstance(repo, dict) else "",
+                        "discovered_via": "onboarding",
+                        "auto_discovered": 1,
+                    })
+                    asset_count += 1
+    except Exception:
+        pass  # Non-fatal
+
     # Mark onboarding as complete
-    result = await db.execute(select(Setting).where(Setting.key == "onboard_complete"))
-    existing = result.scalar_one_or_none()
-    if existing:
-        existing.value = "true"
-    else:
-        db.add(Setting(key="onboard_complete", value="true"))
+    await dl.set_setting("onboard_complete", "true")
     applied.append("onboard_complete")
 
-    await db.commit()
+    await dl.commit()
 
     # Sync to runtime config
     from api.settings import _sync_to_runtime
-    await _sync_to_runtime(db)
+    await _sync_to_runtime(dl)
 
-    return {"applied": applied, "count": len(applied)}
+    return {"applied": applied, "count": len(applied), "org_id": org_id, "org": org}
 
 
 @router.get("/status")
-async def onboard_status(db: AsyncSession = Depends(get_db)):
+async def onboard_status(dl: DataLayer = Depends(get_data_layer)):
     """Check onboarding progress — what's been completed."""
-    result = await db.execute(select(Setting))
-    stored = {s.key: s.value for s in result.scalars().all()}
+    stored = await dl.get_all_settings()
 
     return {
         "complete": stored.get("onboard_complete") == "true",
@@ -178,4 +296,5 @@ async def onboard_status(db: AsyncSession = Depends(get_db)):
         "has_service_map": bool(stored.get("df_service_map")),
         "company_name": stored.get("onboard_company_name", ""),
         "industry": stored.get("onboard_industry", ""),
+        "org_id": dl.org_id,
     }

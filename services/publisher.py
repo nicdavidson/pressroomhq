@@ -1,52 +1,40 @@
-"""Publisher — Post approved content via DreamFactory social services.
+"""Publisher — Post approved content directly via social OAuth tokens.
 
-Uses DF service discovery to find available social platforms,
-then posts through their standard REST endpoints.
+Pressroom owns the OAuth tokens per-org. No DreamFactory needed for publishing.
+Each org connects their social accounts, and we post directly via platform APIs.
 """
 
-from services.df_client import df
+import logging
+from services import social_auth
 from services.data_layer import DataLayer
 
+log = logging.getLogger("pressroom")
 
-# Channel → DF social service type mapping
-CHANNEL_TO_SOCIAL = {
-    "linkedin": "linkedin",
-    "facebook": "facebook",
-    "x_thread": "x_twitter",
-}
+# Channels that support direct publishing
+DIRECT_CHANNELS = {"linkedin", "facebook"}
 
 
-async def discover_publishers() -> dict[str, str]:
-    """Find available social services via DF. Returns {channel: service_name}."""
-    if not df.available:
-        return {}
-    try:
-        services = await df.discover_social_services()
-        # Map DF service types back to our channels
-        type_to_name = {s.get("type"): s.get("name") for s in services}
-        publishers = {}
-        for channel, social_type in CHANNEL_TO_SOCIAL.items():
-            if social_type in type_to_name:
-                publishers[channel] = type_to_name[social_type]
-        return publishers
-    except Exception:
-        return {}
-
-
-async def publish_single(content: dict, service_name: str) -> dict:
-    """Post a single content item to a DF social service."""
+async def publish_single(content: dict, settings: dict) -> dict:
+    """Post a single content item using stored OAuth tokens."""
     channel = content.get("channel", "")
-    payload = {"text": content.get("body", "")}
+    text = content.get("body", "")
 
-    # Channel-specific payload shaping
     if channel == "linkedin":
-        payload = {"text": content["body"], "visibility": "PUBLIC", "author_type": "person"}
-    elif channel == "x_thread":
-        payload = {"text": content["body"], "thread": True}
-    elif channel == "facebook":
-        payload = {"message": content["body"]}
+        token = settings.get("linkedin_access_token", "")
+        author = settings.get("linkedin_author_urn", "")
+        if not token or not author:
+            return {"error": "LinkedIn not connected — authorize in Connections"}
+        return await social_auth.linkedin_post(token, author, text)
 
-    return await df.social_post(service_name, payload)
+    elif channel == "facebook":
+        page_token = settings.get("facebook_page_token", "")
+        page_id = settings.get("facebook_page_id", "")
+        if not page_token or not page_id:
+            return {"error": "Facebook not connected — authorize in Connections"}
+        return await social_auth.facebook_post(page_token, page_id, text)
+
+    else:
+        return {"status": "no_destination", "note": f"No publisher for channel: {channel}"}
 
 
 async def publish_approved(dl: DataLayer) -> list[dict]:
@@ -55,27 +43,30 @@ async def publish_approved(dl: DataLayer) -> list[dict]:
     if not items:
         return []
 
-    # Discover which social services are available
-    publishers = await discover_publishers()
+    # Load org settings once for all items
+    settings = await dl.get_all_settings()
 
     results = []
     for content in items:
         channel = content.get("channel", "")
         content_id = content.get("id")
 
-        if channel in publishers:
+        if channel in DIRECT_CHANNELS:
             try:
-                pub_result = await publish_single(content, publishers[channel])
-                await dl.update_content_status(content_id, "published")
+                pub_result = await publish_single(content, settings)
+                if pub_result.get("success"):
+                    await dl.update_content_status(content_id, "published")
+                    log.info("Published %s content #%s", channel, content_id)
                 results.append({"id": content_id, "channel": channel, "result": pub_result})
             except Exception as e:
+                log.error("Publish failed for %s #%s: %s", channel, content_id, e)
                 results.append({"id": content_id, "channel": channel, "error": str(e)})
         else:
-            # No live publisher for this channel — mark published anyway for demo
+            # No live publisher for this channel — mark published for demo
             await dl.update_content_status(content_id, "published")
             results.append({
                 "id": content_id, "channel": channel,
-                "result": {"status": "no_destination", "note": f"No DF social service for {channel}"},
+                "result": {"status": "no_destination", "note": f"No direct publisher for {channel}"},
             })
 
     await dl.commit()

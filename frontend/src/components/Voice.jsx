@@ -2,6 +2,12 @@ import { useState, useEffect, useCallback } from 'react'
 
 const API = '/api'
 
+function orgHeaders(orgId) {
+  const h = { 'Content-Type': 'application/json' }
+  if (orgId) h['X-Org-Id'] = String(orgId)
+  return h
+}
+
 const CHANNEL_STYLES = [
   { key: 'voice_linkedin_style', label: 'LinkedIn', icon: 'LI' },
   { key: 'voice_x_style', label: 'X / Twitter', icon: 'X' },
@@ -11,7 +17,7 @@ const CHANNEL_STYLES = [
   { key: 'voice_yt_style', label: 'YouTube Script', icon: 'YT' },
 ]
 
-export default function Voice({ onLog }) {
+export default function Voice({ onLog, orgId }) {
   const [settings, setSettings] = useState({})
   const [edits, setEdits] = useState({})
   const [saving, setSaving] = useState(false)
@@ -19,14 +25,17 @@ export default function Voice({ onLog }) {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/settings`)
+      const res = await fetch(`${API}/settings`, { headers: orgHeaders(orgId) })
       setSettings(await res.json())
     } catch (e) {
       onLog?.('Failed to load voice settings', 'error')
     }
-  }, [onLog])
+  }, [onLog, orgId])
 
   useEffect(() => { load() }, [load])
+
+  // Reset edits when org changes
+  useEffect(() => { setEdits({}) }, [orgId])
 
   const edit = (key, val) => setEdits(prev => ({ ...prev, [key]: val }))
   const getVal = (key) => edits[key] ?? settings[key]?.value ?? ''
@@ -39,7 +48,7 @@ export default function Voice({ onLog }) {
     try {
       await fetch(`${API}/settings`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: orgHeaders(orgId),
         body: JSON.stringify({ settings: edits }),
       })
       setEdits({})

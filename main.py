@@ -16,11 +16,26 @@ from api.publish import router as publish_router
 from api.settings import router as settings_router
 from api.imports import router as imports_router
 from api.onboard import router as onboard_router
+from api.orgs import router as orgs_router
+from api.oauth import router as oauth_router
+from api.datasources import router as datasources_router
+from api.audit import router as audit_router
+from api.assets import router as assets_router
+from api.stories import router as stories_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+
+    # Load account-level settings (API keys, models) into runtime config at boot
+    from database import async_session
+    from services.data_layer import DataLayer
+    from api.settings import _sync_to_runtime
+    async with async_session() as session:
+        dl = DataLayer(session, org_id=None)
+        await _sync_to_runtime(dl)
+
     yield
 
 
@@ -51,6 +66,12 @@ app.include_router(publish_router)
 app.include_router(settings_router)
 app.include_router(imports_router)
 app.include_router(onboard_router)
+app.include_router(orgs_router)
+app.include_router(oauth_router)
+app.include_router(datasources_router)
+app.include_router(audit_router)
+app.include_router(assets_router)
+app.include_router(stories_router)
 
 # Serve frontend static files if built — MUST be last (catch-all)
 frontend_dist = Path(__file__).parent / "frontend" / "dist"

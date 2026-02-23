@@ -1,20 +1,22 @@
-"""Settings endpoints — configure API keys, scout sources, voice profile."""
+"""Settings endpoints — configure API keys, scout sources, voice profile.
+
+All settings are org-scoped via the X-Org-Id header.
+Global settings (no org) are used for shared config like API keys.
+"""
 
 import json
 import httpx
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db
-from models import Setting
+from database import get_data_layer
+from services.data_layer import DataLayer
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 # Default settings structure
 DEFAULTS = {
-    # API Keys
+    # API Keys (typically global, but can be per-org)
     "anthropic_api_key": "",
     "github_token": "",
     # DreamFactory
@@ -26,24 +28,36 @@ DEFAULTS = {
     "scout_subreddits": '["selfhosted", "webdev"]',
     "scout_rss_feeds": '[]',
     # Voice profile — core
-    "voice_persona": "Montana-based engineer building real AI infrastructure",
-    "voice_audience": "Engineers and technical decision-makers",
-    "voice_tone": "Direct, opinionated, no corporate-speak",
-    "voice_never_say": '["excited to share", "game-changer", "leverage", "synergy", "thrilled", "comprehensive", "robust"]',
-    "voice_always": "Here's what I built, here's what broke, here's what I learned",
-    "voice_brand_keywords": '["DreamFactory", "REST API", "open source"]',
-    "voice_writing_examples": "",  # paste examples of ideal writing
-    "voice_bio": "",  # one-liner bio for author attribution
-    # Voice profile — per-channel overrides (JSON objects)
-    "voice_linkedin_style": "Professional but not corporate. Hook in first line. No hashtag spam.",
-    "voice_x_style": "Conversational, punchy. Under 280 chars per tweet. No thread emoji.",
-    "voice_blog_style": "Technical depth. Code snippets welcome. No fluff intros.",
-    "voice_email_style": "Plain text feel. One clear CTA. Subject line that gets opened.",
-    "voice_newsletter_style": "Casual, informative. This week format. Community highlights.",
-    "voice_yt_style": "Written for speaking. B-roll markers. 2-4 min read-aloud.",
+    "voice_persona": "",
+    "voice_audience": "",
+    "voice_tone": "",
+    "voice_never_say": '[]',
+    "voice_always": "",
+    "voice_brand_keywords": '[]',
+    "voice_writing_examples": "",
+    "voice_bio": "",
+    # Voice profile — per-channel overrides
+    "voice_linkedin_style": "",
+    "voice_x_style": "",
+    "voice_blog_style": "",
+    "voice_email_style": "",
+    "voice_newsletter_style": "",
+    "voice_yt_style": "",
     # Engine
     "claude_model": "claude-sonnet-4-6",
     "claude_model_fast": "claude-haiku-4-5-20251001",
+    # Social OAuth (app credentials — typically global)
+    "linkedin_client_id": "",
+    "linkedin_client_secret": "",
+    "facebook_app_id": "",
+    "facebook_app_secret": "",
+    # Social OAuth (per-org tokens — set by OAuth callback)
+    "linkedin_access_token": "",
+    "linkedin_author_urn": "",
+    "linkedin_profile_name": "",
+    "facebook_page_token": "",
+    "facebook_page_id": "",
+    "facebook_page_name": "",
     # Webhook
     "github_webhook_secret": "",
     # Onboarding metadata
@@ -55,8 +69,22 @@ DEFAULTS = {
     "df_service_map": "",
 }
 
+# Account-level keys — shared across all companies, saved with org_id=NULL
+ACCOUNT_KEYS = {
+    "anthropic_api_key", "github_token",
+    "df_base_url", "df_api_key",
+    "claude_model", "claude_model_fast",
+    "linkedin_client_id", "linkedin_client_secret",
+    "facebook_app_id", "facebook_app_secret",
+    "github_webhook_secret",
+}
+
 # Keys that should be masked in GET responses
-SENSITIVE_KEYS = {"anthropic_api_key", "github_token", "df_api_key", "github_webhook_secret"}
+SENSITIVE_KEYS = {
+    "anthropic_api_key", "github_token", "df_api_key", "github_webhook_secret",
+    "linkedin_client_secret", "facebook_app_secret",
+    "linkedin_access_token", "facebook_page_token",
+}
 
 
 def _mask(key: str, value: str) -> str:
@@ -70,12 +98,10 @@ class SettingsUpdate(BaseModel):
 
 
 @router.get("")
-async def get_settings(db: AsyncSession = Depends(get_db)):
-    """Get all settings (sensitive values masked)."""
-    result = await db.execute(select(Setting))
-    stored = {s.key: s.value for s in result.scalars().all()}
+async def get_settings(dl: DataLayer = Depends(get_data_layer)):
+    """Get all settings (sensitive values masked). Merges account + org settings."""
+    stored = await dl.get_all_settings()
 
-    # Merge defaults with stored
     merged = {}
     for key, default in DEFAULTS.items():
         raw = stored.get(key, default)
@@ -83,62 +109,55 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
             "value": _mask(key, raw),
             "is_set": bool(raw and raw != default),
             "sensitive": key in SENSITIVE_KEYS,
+            "scope": "account" if key in ACCOUNT_KEYS else "company",
         }
     return merged
 
 
 @router.get("/raw/{key}")
-async def get_setting_raw(key: str, db: AsyncSession = Depends(get_db)):
+async def get_setting_raw(key: str, dl: DataLayer = Depends(get_data_layer)):
     """Get a single setting value (unmasked). Use sparingly."""
-    result = await db.execute(select(Setting).where(Setting.key == key))
-    s = result.scalar_one_or_none()
-    if s:
-        return {"key": key, "value": s.value}
-    return {"key": key, "value": DEFAULTS.get(key, "")}
+    value = await dl.get_setting(key)
+    return {"key": key, "value": value or DEFAULTS.get(key, "")}
 
 
 @router.put("")
-async def update_settings(req: SettingsUpdate, db: AsyncSession = Depends(get_db)):
-    """Update one or more settings."""
+async def update_settings(req: SettingsUpdate, dl: DataLayer = Depends(get_data_layer)):
+    """Update one or more settings. Account keys route to org_id=NULL, company keys to current org."""
     updated = []
     for key, value in req.settings.items():
         if key not in DEFAULTS:
             continue
-        result = await db.execute(select(Setting).where(Setting.key == key))
-        existing = result.scalar_one_or_none()
-        if existing:
-            existing.value = value
+        if key in ACCOUNT_KEYS:
+            await dl.set_account_setting(key, value)
         else:
-            db.add(Setting(key=key, value=value))
+            await dl.set_setting(key, value)
         updated.append(key)
 
-    await db.commit()
+    await dl.commit()
 
     # Reload runtime config from DB
-    await _sync_to_runtime(db)
+    await _sync_to_runtime(dl)
 
     return {"updated": updated}
 
 
 @router.get("/status")
-async def connection_status(db: AsyncSession = Depends(get_db)):
-    """Check connection status for all configured services."""
-    settings = {}
-    result = await db.execute(select(Setting))
-    for s in result.scalars().all():
-        settings[s.key] = s.value
+async def connection_status(dl: DataLayer = Depends(get_data_layer)):
+    """Check connection status for all configured services. Uses merged account + org settings."""
+    stored = await dl.get_all_settings()
 
     status = {}
 
     # Anthropic
-    api_key = settings.get("anthropic_api_key", "")
+    api_key = stored.get("anthropic_api_key", "")
     status["anthropic"] = {
         "configured": bool(api_key),
-        "model": settings.get("claude_model", DEFAULTS["claude_model"]),
+        "model": stored.get("claude_model", DEFAULTS["claude_model"]),
     }
 
     # GitHub
-    gh_token = settings.get("github_token", "")
+    gh_token = stored.get("github_token", "")
     if gh_token:
         try:
             async with httpx.AsyncClient() as client:
@@ -158,8 +177,8 @@ async def connection_status(db: AsyncSession = Depends(get_db)):
         status["github"] = {"configured": False}
 
     # DreamFactory
-    df_url = settings.get("df_base_url", DEFAULTS["df_base_url"])
-    df_key = settings.get("df_api_key", "")
+    df_url = stored.get("df_base_url", DEFAULTS["df_base_url"])
+    df_key = stored.get("df_api_key", "")
     if df_key:
         try:
             async with httpx.AsyncClient() as client:
@@ -179,10 +198,10 @@ async def connection_status(db: AsyncSession = Depends(get_db)):
         status["dreamfactory"] = {"configured": False, "url": df_url}
 
     # Scout sources
-    repos = json.loads(settings.get("scout_github_repos", DEFAULTS["scout_github_repos"]))
-    hn_kw = json.loads(settings.get("scout_hn_keywords", DEFAULTS["scout_hn_keywords"]))
-    subs = json.loads(settings.get("scout_subreddits", DEFAULTS["scout_subreddits"]))
-    rss = json.loads(settings.get("scout_rss_feeds", DEFAULTS["scout_rss_feeds"]))
+    repos = json.loads(stored.get("scout_github_repos", DEFAULTS["scout_github_repos"]))
+    hn_kw = json.loads(stored.get("scout_hn_keywords", DEFAULTS["scout_hn_keywords"]))
+    subs = json.loads(stored.get("scout_subreddits", DEFAULTS["scout_subreddits"]))
+    rss = json.loads(stored.get("scout_rss_feeds", DEFAULTS["scout_rss_feeds"]))
     status["scout"] = {
         "github_repos": len(repos),
         "hn_keywords": len(hn_kw),
@@ -205,7 +224,6 @@ async def df_services():
         social = await df.discover_social_services()
         databases = await df.discover_db_services()
 
-        # Check social auth status for each
         social_with_auth = []
         for svc in social:
             name = svc.get("name", "")
@@ -226,11 +244,10 @@ async def df_services():
         return {"available": False, "error": str(e), "services": [], "social": [], "databases": []}
 
 
-async def _sync_to_runtime(db: AsyncSession):
-    """Push DB settings into the runtime config object."""
+async def _sync_to_runtime(dl: DataLayer):
+    """Push account-level DB settings into the runtime config object."""
     from config import settings as cfg
-    result = await db.execute(select(Setting))
-    stored = {s.key: s.value for s in result.scalars().all()}
+    stored = await dl.get_account_settings()
 
     if stored.get("anthropic_api_key"):
         cfg.anthropic_api_key = stored["anthropic_api_key"]

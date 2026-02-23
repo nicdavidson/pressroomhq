@@ -2,13 +2,24 @@ import { useState, useEffect, useCallback } from 'react'
 
 const API = '/api'
 
+// Account settings don't send X-Org-Id — they're shared across all companies
+function accountHeaders() {
+  return { 'Content-Type': 'application/json' }
+}
+
+function orgHeaders(orgId) {
+  const h = { 'Content-Type': 'application/json' }
+  if (orgId) h['X-Org-Id'] = String(orgId)
+  return h
+}
+
 function StatusDot({ connected, configured }) {
   if (!configured) return <span className="dot dot-off" title="Not configured" />
   if (connected) return <span className="dot dot-on" title="Connected" />
   return <span className="dot dot-warn" title="Configured but not connected" />
 }
 
-export default function Settings({ onLog }) {
+export default function Settings({ onLog, orgId }) {
   const [settings, setSettings] = useState({})
   const [status, setStatus] = useState({})
   const [dfServices, setDfServices] = useState(null)
@@ -19,41 +30,43 @@ export default function Settings({ onLog }) {
   const load = useCallback(async () => {
     try {
       const [setRes, statRes] = await Promise.all([
-        fetch(`${API}/settings`),
-        fetch(`${API}/settings/status`),
+        fetch(`${API}/settings`, { headers: orgHeaders(orgId) }),
+        fetch(`${API}/settings/status`, { headers: orgHeaders(orgId) }),
       ])
       setSettings(await setRes.json())
       setStatus(await statRes.json())
     } catch (e) {
       onLog?.('Failed to load settings', 'error')
     }
-  }, [onLog])
+  }, [onLog, orgId])
 
   const loadDfServices = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/settings/df-services`)
+      const res = await fetch(`${API}/settings/df-services`, { headers: orgHeaders(orgId) })
       setDfServices(await res.json())
     } catch (e) {
       setDfServices({ available: false })
     }
-  }, [])
+  }, [orgId])
 
   useEffect(() => { load(); loadDfServices() }, [load, loadDfServices])
+  useEffect(() => { setEdits({}) }, [orgId])
 
   const edit = (key, val) => setEdits(prev => ({ ...prev, [key]: val }))
 
   const save = async () => {
     if (Object.keys(edits).length === 0) return
     setSaving(true)
-    onLog?.('Saving settings...', 'action')
+    onLog?.('Saving account settings...', 'action')
     try {
+      // Account keys go without org header, ensuring they save to org_id=NULL
       await fetch(`${API}/settings`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: accountHeaders(),
         body: JSON.stringify({ settings: edits }),
       })
       setEdits({})
-      onLog?.(`Settings saved: ${Object.keys(edits).join(', ')}`, 'success')
+      onLog?.(`Account settings saved: ${Object.keys(edits).join(', ')}`, 'success')
       await load()
       await loadDfServices()
     } catch (e) {
@@ -68,8 +81,8 @@ export default function Settings({ onLog }) {
     onLog?.('Checking connections...', 'action')
     try {
       const [statRes, dfRes] = await Promise.all([
-        fetch(`${API}/settings/status`),
-        fetch(`${API}/settings/df-services`),
+        fetch(`${API}/settings/status`, { headers: orgHeaders(orgId) }),
+        fetch(`${API}/settings/df-services`, { headers: orgHeaders(orgId) }),
       ])
       const data = await statRes.json()
       const dfData = await dfRes.json()
@@ -81,7 +94,6 @@ export default function Settings({ onLog }) {
       if (data.dreamfactory?.connected) onLog?.(`DreamFactory: connected at ${data.dreamfactory.url}`, 'success')
       else if (data.dreamfactory?.configured) onLog?.(`DreamFactory: ${data.dreamfactory.error || 'not connected'}`, 'error')
       if (data.anthropic?.configured) onLog?.(`Anthropic: configured (${data.anthropic.model})`, 'success')
-      onLog?.(`Scout: ${data.scout?.total_sources || 0} sources configured`, 'detail')
 
       if (dfData.available) {
         onLog?.(`DF Services: ${dfData.services?.length || 0} total, ${dfData.social?.length || 0} social, ${dfData.databases?.length || 0} databases`, 'success')
@@ -103,7 +115,8 @@ export default function Settings({ onLog }) {
   return (
     <div className="settings-page">
       <div className="settings-header">
-        <h2 className="settings-title">Configuration</h2>
+        <h2 className="settings-title">Account Settings</h2>
+        <div className="settings-subtitle">Shared across all companies</div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className={`btn btn-run ${checking ? 'loading' : ''}`} onClick={checkConnections} disabled={checking}>
             {checking ? 'Checking...' : 'Test Connections'}
@@ -133,11 +146,6 @@ export default function Settings({ onLog }) {
             <span>DreamFactory</span>
             <span className="status-detail">{status.dreamfactory?.connected ? status.dreamfactory.url : status.dreamfactory?.configured ? 'Not connected' : 'No API key'}</span>
           </div>
-          <div className="status-item">
-            <span className="dot dot-info" />
-            <span>Scout Sources</span>
-            <span className="status-detail">{status.scout?.total_sources || 0} sources ({status.scout?.github_repos || 0} repos, {status.scout?.subreddits || 0} subs, {status.scout?.hn_keywords || 0} HN keywords)</span>
-          </div>
         </div>
       </div>
 
@@ -155,10 +163,7 @@ export default function Settings({ onLog }) {
             ))}
             {dfServices.social?.map(svc => (
               <div key={svc.name} className="status-item">
-                <StatusDot
-                  configured={true}
-                  connected={svc.auth_status?.connected}
-                />
+                <StatusDot configured={true} connected={svc.auth_status?.connected} />
                 <span>{svc.label || svc.name}</span>
                 <span className="status-detail">
                   {svc.auth_status?.connected ? 'Authenticated' : 'Needs OAuth'}
@@ -190,21 +195,21 @@ export default function Settings({ onLog }) {
         <SettingField label="DF API Key" k="df_api_key" type="password" getVal={getVal} edit={edit} settings={settings} />
       </div>
 
-      {/* SCOUT SOURCES */}
-      <div className="settings-section">
-        <div className="section-label">Scout Sources</div>
-        <SettingField label="GitHub Repos (JSON array)" k="scout_github_repos" getVal={getVal} edit={edit} settings={settings} placeholder='["owner/repo"]' />
-        <SettingField label="HN Keywords (JSON array)" k="scout_hn_keywords" getVal={getVal} edit={edit} settings={settings} placeholder='["keyword1", "keyword2"]' />
-        <SettingField label="Subreddits (JSON array)" k="scout_subreddits" getVal={getVal} edit={edit} settings={settings} placeholder='["selfhosted", "webdev"]' />
-        <SettingField label="RSS Feeds (JSON array)" k="scout_rss_feeds" getVal={getVal} edit={edit} settings={settings} placeholder='["https://example.com/feed.xml"]' />
-      </div>
-
       {/* ENGINE */}
       <div className="settings-section">
         <div className="section-label">Engine</div>
         <SettingField label="Claude Model (content)" k="claude_model" getVal={getVal} edit={edit} settings={settings} placeholder="claude-sonnet-4-6" />
         <SettingField label="Claude Model (fast/analysis)" k="claude_model_fast" getVal={getVal} edit={edit} settings={settings} placeholder="claude-haiku-4-5-20251001" />
         <SettingField label="GitHub Webhook Secret" k="github_webhook_secret" type="password" getVal={getVal} edit={edit} settings={settings} />
+      </div>
+
+      {/* OAUTH APP CREDENTIALS */}
+      <div className="settings-section">
+        <div className="section-label">OAuth App Credentials</div>
+        <SettingField label="LinkedIn Client ID" k="linkedin_client_id" getVal={getVal} edit={edit} settings={settings} />
+        <SettingField label="LinkedIn Client Secret" k="linkedin_client_secret" type="password" getVal={getVal} edit={edit} settings={settings} />
+        <SettingField label="Facebook App ID" k="facebook_app_id" getVal={getVal} edit={edit} settings={settings} />
+        <SettingField label="Facebook App Secret" k="facebook_app_secret" type="password" getVal={getVal} edit={edit} settings={settings} />
       </div>
     </div>
   )

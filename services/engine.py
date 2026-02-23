@@ -4,12 +4,18 @@ Uses:
 - Voice settings from the DB (onboarding-configured or manually set)
 - Memory context (approved examples, spiked anti-patterns, recent topics)
 - DF intelligence (customer data, analytics, CRM data from connected services)
+- Structured brief with per-channel signal routing
 """
 
 import json
+import logging
+import re
+import httpx
 import anthropic
 from config import settings
 from models import ContentChannel
+
+log = logging.getLogger("pressroom")
 
 
 def _get_client():
@@ -32,9 +38,11 @@ CHANNEL_RULES = {
 - No hashtags unless they're genuinely useful (max 3)
 - End with a thought or question, not a CTA
 - Write like a human sharing insight, not a marketer
-- No bullet-point listicles unless the content genuinely demands it""",
+- No bullet-point listicles unless the content genuinely demands it
+- Don't start with "I" — start with the insight""",
         "headline_prefix": "LINKEDIN",
         "style_key": "voice_linkedin_style",
+        "signal_affinity": ["hackernews", "reddit", "rss", "github_release"],
     },
     ContentChannel.x_thread: {
         "rules": """- 5-8 tweets
@@ -43,9 +51,11 @@ CHANNEL_RULES = {
 - Number them 1/, 2/, etc.
 - Last tweet: takeaway or link
 - Conversational, not performative
-- No "thread" opener""",
+- No "thread" opener — just start with the insight
+- Use concrete numbers and specifics, not vague claims""",
         "headline_prefix": "X THREAD",
         "style_key": "voice_x_style",
+        "signal_affinity": ["hackernews", "github_release", "github_commit", "reddit"],
     },
     ContentChannel.blog: {
         "rules": """- 800-1500 words
@@ -53,18 +63,23 @@ CHANNEL_RULES = {
 - H2 subheadings every 200-300 words
 - Technical depth — code snippets where relevant
 - No fluff intro paragraphs. Start with the point.
-- End with what's next, not a generic conclusion""",
+- End with what's next, not a generic conclusion
+- Include specific examples, benchmarks, or comparisons where possible
+- Internal linking suggestions in [LINK: topic] markers""",
         "headline_prefix": "BLOG DRAFT",
         "style_key": "voice_blog_style",
+        "signal_affinity": ["github_release", "github_commit", "rss", "hackernews"],
     },
     ContentChannel.release_email: {
         "rules": """- Subject line that gets opened (not clickbait, just clear value)
 - 200-400 words
 - What shipped, why it matters, how to use it
 - One clear CTA
-- Plain text feel, not HTML newsletter energy""",
+- Plain text feel, not HTML newsletter energy
+- Lead with the benefit, not the feature""",
         "headline_prefix": "RELEASE EMAIL",
         "style_key": "voice_email_style",
+        "signal_affinity": ["github_release", "github_commit"],
     },
     ContentChannel.newsletter: {
         "rules": """- 300-500 words
@@ -74,6 +89,7 @@ CHANNEL_RULES = {
 - Casual, informative, not salesy""",
         "headline_prefix": "NEWSLETTER",
         "style_key": "voice_newsletter_style",
+        "signal_affinity": ["github_release", "hackernews", "reddit", "rss"],
     },
     ContentChannel.yt_script: {
         "rules": """- 2-4 minutes when read aloud (~300-600 words)
@@ -83,6 +99,7 @@ CHANNEL_RULES = {
 - End with a clear next step""",
         "headline_prefix": "YT SCRIPT",
         "style_key": "voice_yt_style",
+        "signal_affinity": ["github_release", "hackernews", "rss"],
     },
 }
 
@@ -143,32 +160,68 @@ def _build_voice_block(voice_settings: dict | None) -> str:
     return "\n".join(parts)
 
 
-def _build_system_prompt(channel: ContentChannel, voice_settings: dict | None) -> str:
-    """Build the full system prompt for a channel using voice settings."""
+def _build_system_prompt(channel: ContentChannel, voice_settings: dict | None,
+                         assets: list[dict] | None = None) -> str:
+    """Build the system prompt — positions as the company's writer, not a generic engine."""
     channel_config = CHANNEL_RULES.get(channel)
     if not channel_config:
-        return "You are a content engine. Generate content."
+        return "You are a content writer. Generate content."
+
+    v = voice_settings or DEFAULT_VOICE
+    company = v.get("onboard_company_name", "the company")
+    persona = v.get("voice_persona", "")
+    audience = v.get("voice_audience", DEFAULT_VOICE["voice_audience"])
+    tone = v.get("voice_tone", DEFAULT_VOICE["voice_tone"])
 
     voice_block = _build_voice_block(voice_settings)
 
     # Get channel-specific style override
-    v = voice_settings or {}
     style_key = channel_config.get("style_key", "")
     channel_style = v.get(style_key, "")
-    style_line = f"\nChannel style: {channel_style}" if channel_style else ""
+    style_line = f"\nChannel-specific style notes: {channel_style}" if channel_style else ""
 
     # Writing examples
     examples = v.get("voice_writing_examples", "")
     examples_block = ""
     if examples and len(examples) > 20:
-        examples_block = f"\n\nWRITING EXAMPLES (match this style):\n{examples[:2000]}"
+        examples_block = f"\n\nWRITING EXAMPLES (match this voice and style closely):\n{examples[:2000]}"
 
-    return f"""You are a content engine for Pressroom — an AI-powered content operations platform. Generate a {channel_config['headline_prefix']} post.
+    # Competitive positioning
+    comp_raw = v.get("onboard_competitors", "")
+    comp_block = ""
+    try:
+        comps = json.loads(comp_raw) if isinstance(comp_raw, str) and comp_raw else []
+        if comps:
+            comp_block = f"""
 
-{voice_block}{style_line}
+COMPETITIVE POSITIONING:
+You are writing for {company}, NOT for {', '.join(comps)}.
+When these competitors come up in signals, frame them as context — what {company} does differently, why the audience should care about {company}'s approach.
+Never trash competitors. Position through strength, not comparison."""
+    except (json.JSONDecodeError, TypeError):
+        pass
 
-Rules:
-{channel_config['rules']}{examples_block}"""
+    asset_block = ""
+    if assets:
+        asset_block = "\n\n" + _build_asset_map_block(assets)
+
+    return f"""You are writing as {company}'s content team. {persona}
+
+Your audience: {audience}
+Your tone: {tone}
+
+You're writing a {channel_config['headline_prefix']} post based on today's intelligence signals.{style_line}
+
+{voice_block}{comp_block}{asset_block}
+
+CONTENT RULES FOR {channel_config['headline_prefix']}:
+{channel_config['rules']}
+
+CRITICAL:
+- Write as {company}. Not as an AI. Not as "a content engine." As {company}'s voice.
+- Every piece must have a specific, defensible point of view. No "it depends" hedging.
+- If the signal is about your company, own it. If it's industry news, give your take on it.
+- Prefer concrete specifics over vague claims. Numbers, examples, real scenarios.{examples_block}"""
 
 
 def _build_memory_block(memory: dict | None, channel: ContentChannel) -> str:
@@ -183,19 +236,23 @@ def _build_memory_block(memory: dict | None, channel: ContentChannel) -> str:
     if approved:
         parts.append("PREVIOUSLY APPROVED (write MORE like these):")
         for item in approved[:3]:
-            parts.append(f"  - {item.get('headline', 'N/A')}")
+            headline = item.get("headline", "N/A")
+            body_preview = item.get("body", "")[:150]
+            parts.append(f"  - {headline}")
+            if body_preview:
+                parts.append(f"    Preview: {body_preview}...")
 
     spiked = memory.get("spiked", {}).get(ch, [])
     if spiked:
-        parts.append("PREVIOUSLY SPIKED (write LESS like these):")
+        parts.append("PREVIOUSLY SPIKED (write LESS like these — the editor rejected these):")
         for item in spiked[:3]:
             parts.append(f"  - {item.get('headline', 'N/A')}")
 
     recent = memory.get("recent_topics", [])
     if recent:
-        recent_headlines = [r.get("headline", "") for r in recent[:10] if r.get("headline")]
+        recent_headlines = [r.get("headline", "") for r in recent[:15] if r.get("headline")]
         if recent_headlines:
-            parts.append("RECENT TOPICS (avoid repeating):")
+            parts.append("RECENT TOPICS (DO NOT repeat these angles — find a fresh take):")
             for h in recent_headlines:
                 parts.append(f"  - {h}")
 
@@ -203,83 +260,194 @@ def _build_memory_block(memory: dict | None, channel: ContentChannel) -> str:
 
 
 def _build_intelligence_block(memory: dict | None) -> str:
-    """Build a DF intelligence section from queried service data."""
+    """Build intelligence section from DF data + connected DataSources."""
     if not memory:
         return ""
 
+    parts = []
+
+    # DF intelligence (from service map queries)
     intelligence = memory.get("df_intelligence", {})
-    if not intelligence:
+    if intelligence:
+        parts.append("COMPANY INTELLIGENCE (from connected data sources):")
+        for svc_name, svc_data in intelligence.items():
+            role = svc_data.get("role", "").replace("_", " ")
+            desc = svc_data.get("description", "")
+            parts.append(f"\n[{role.upper()}] {svc_name}: {desc}")
+
+            for table_data in svc_data.get("data", []):
+                table = table_data.get("table", "")
+                rows = table_data.get("recent_rows", [])
+                if rows:
+                    parts.append(f"  Recent from {table}:")
+                    for row in rows[:5]:
+                        highlights = []
+                        for k, v in list(row.items())[:4]:
+                            if v and k not in ("id", "created_at", "updated_at"):
+                                highlights.append(f"{k}: {v[:100]}")
+                        if highlights:
+                            parts.append(f"    - {' | '.join(highlights)}")
+
+    # DataSource records (from Connections tab)
+    datasources = memory.get("datasources", [])
+    if datasources:
+        if not parts:
+            parts.append("CONNECTED DATA SOURCES:")
+        else:
+            parts.append("\nADDITIONAL CONNECTED SOURCES:")
+        for ds in datasources:
+            cat = ds.get("category", "").upper()
+            name = ds.get("name", "")
+            desc = ds.get("description", "")
+            conn_type = ds.get("connection_type", "")
+            parts.append(f"  [{cat}] {name} ({conn_type}): {desc}")
+
+    return "\n".join(parts) if parts else ""
+
+
+def _build_asset_map_block(assets: list[dict]) -> str:
+    """Build a COMPANY DIGITAL FOOTPRINT section from asset records."""
+    if not assets:
         return ""
 
-    parts = ["COMPANY INTELLIGENCE (from connected data sources):"]
-    for svc_name, svc_data in intelligence.items():
-        role = svc_data.get("role", "").replace("_", " ")
-        desc = svc_data.get("description", "")
-        parts.append(f"\n[{role.upper()}] {svc_name}: {desc}")
+    grouped: dict[str, list[dict]] = {}
+    for a in assets:
+        grouped.setdefault(a.get("asset_type", "other"), []).append(a)
 
-        for table_data in svc_data.get("data", []):
-            table = table_data.get("table", "")
-            rows = table_data.get("recent_rows", [])
-            if rows:
-                parts.append(f"  Recent from {table}:")
-                for row in rows[:5]:
-                    # Format row as key highlights
-                    highlights = []
-                    for k, v in list(row.items())[:4]:
-                        if v and k not in ("id", "created_at", "updated_at"):
-                            highlights.append(f"{k}: {v[:100]}")
-                    if highlights:
-                        parts.append(f"    - {' | '.join(highlights)}")
+    parts = ["COMPANY DIGITAL FOOTPRINT:"]
+    for atype, items in sorted(grouped.items()):
+        parts.append(f"\n  [{atype.upper()}]")
+        for item in items:
+            label = item.get("label", "")
+            url = item.get("url", "")
+            desc = item.get("description", "")
+            line = f"    - {url}"
+            if label:
+                line += f'  ({label})'
+            if desc:
+                line += f'  — {desc}'
+            parts.append(line)
 
     return "\n".join(parts)
 
 
+def _rank_signals_for_channel(signals: list[dict], channel: ContentChannel) -> list[dict]:
+    """Rank and select the best signals for a specific channel."""
+    channel_config = CHANNEL_RULES.get(channel, {})
+    affinity = channel_config.get("signal_affinity", [])
+
+    # Score each signal based on channel affinity
+    scored = []
+    for s in signals:
+        score = 0
+        sig_type = s.get("type", "")
+        if sig_type in affinity:
+            score = len(affinity) - affinity.index(sig_type)  # higher rank = higher score
+        else:
+            score = -1  # not preferred but still usable
+
+        # Boost signals with more body content (richer source material)
+        body_len = len(s.get("body", ""))
+        if body_len > 200:
+            score += 1
+        if body_len > 500:
+            score += 1
+
+        # Editor-prioritized signals get a significant boost
+        if s.get("prioritized"):
+            score += 10
+
+        scored.append((score, s))
+
+    # Sort by score descending, take top signals
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [s for _, s in scored[:5]]
+
+
 async def generate_brief(signals: list[dict], memory: dict | None = None,
                           voice_settings: dict | None = None) -> dict:
-    """Synthesize signals into a daily brief with recommended angle."""
+    """Synthesize signals into a structured content plan with per-channel recommendations."""
     signal_text = "\n\n".join(
-        f"[{s.get('type', 'unknown')}] {s.get('title', '')}\n{s.get('body', '')[:500]}"
-        for s in signals
+        f"[{i+1}] [{s.get('type', 'unknown')}] {s.get('source', '')} — {s.get('title', '')}\n{s.get('body', '')[:500]}"
+        for i, s in enumerate(signals)
     )
 
     intel_block = _build_intelligence_block(memory)
     intel_section = f"\n\nCompany data from connected sources:\n{intel_block}" if intel_block else ""
 
     voice_block = _build_voice_block(voice_settings)
+    v = voice_settings or DEFAULT_VOICE
+    company = v.get("onboard_company_name", "the company")
+
+    # Include recent topics so the brief avoids them
+    recent_block = ""
+    if memory:
+        recent = memory.get("recent_topics", [])
+        if recent:
+            recent_headlines = [r.get("headline", "") for r in recent[:10] if r.get("headline")]
+            if recent_headlines:
+                recent_block = "\n\nRECENT CONTENT (avoid these topics — find fresh angles):\n" + "\n".join(f"  - {h}" for h in recent_headlines)
 
     response = _get_client().messages.create(
         model=settings.claude_model_fast,
-        max_tokens=1000,
-        system=f"""You are the wire editor at a content operations platform. You receive the day's signals — releases, trends, community posts, support patterns — and synthesize them into a daily brief.
+        max_tokens=1500,
+        system=f"""You are the editorial director at {company}. You receive today's intelligence signals and decide what content to produce.
 
 Company context:
 {voice_block}
 
+Your job: analyze signals, identify the strongest content angles, and create a content plan.
+Think like an editor — what's the story? What angle will resonate with {v.get('voice_audience', 'the audience')}?
+Don't just summarize signals. Find the INSIGHT in them.
+
 Output format:
-SUMMARY: 2-3 sentence overview of what's happening today.
-ANGLE: The single strongest content angle for today (one sentence).
-TOP SIGNALS: Ranked list of the 3-5 most actionable signals with one-line reasoning.
-RECOMMENDATIONS: 2-3 specific content pieces to write, with channel and angle for each.""",
-        messages=[{"role": "user", "content": f"Today's wire:\n\n{signal_text}{intel_section}"}],
+SUMMARY: 2-3 sentence overview of today's signal landscape.
+ANGLE: The single strongest content angle (one sentence, specific and opinionated).
+TOP SIGNALS: Ranked 3-5 signals by content potential, with one-line angle for each.
+LINKEDIN: Specific angle and hook for a LinkedIn post (one sentence).
+X_THREAD: Specific angle and hook for an X thread (one sentence).
+BLOG: Specific angle and working title for a blog post (one sentence).
+RELEASE_EMAIL: If there's a release/shipping signal, the angle. If not, write "SKIP".
+NEWSLETTER: Weekly roundup angle if applicable, or "SKIP".""",
+        messages=[{"role": "user", "content": f"Today's wire ({len(signals)} signals):\n\n{signal_text}{intel_section}{recent_block}"}],
     )
 
     text = response.content[0].text
-    return {"summary": text, "angle": text.split("ANGLE:")[-1].split("\n")[0].strip() if "ANGLE:" in text else ""}
+    log.info("BRIEF generated (%d chars)", len(text))
+
+    # Extract structured angles
+    brief_data = {"summary": text, "angle": "", "channel_angles": {}}
+
+    if "ANGLE:" in text:
+        brief_data["angle"] = text.split("ANGLE:")[-1].split("\n")[0].strip()
+
+    # Parse per-channel recommendations
+    for ch_key in ["LINKEDIN:", "X_THREAD:", "BLOG:", "RELEASE_EMAIL:", "NEWSLETTER:"]:
+        if ch_key in text:
+            ch_angle = text.split(ch_key)[-1].split("\n")[0].strip()
+            if ch_angle.upper() != "SKIP":
+                brief_data["channel_angles"][ch_key.rstrip(":").lower()] = ch_angle
+
+    return brief_data
 
 
-async def generate_content(brief: str, signals: list[dict], channel: ContentChannel,
+async def generate_content(brief: dict, signals: list[dict], channel: ContentChannel,
                            memory: dict | None = None,
-                           voice_settings: dict | None = None) -> dict:
-    """Generate content for a specific channel from a brief and signals."""
+                           voice_settings: dict | None = None,
+                           assets: list[dict] | None = None) -> dict:
+    """Generate content for a specific channel with targeted signals and channel-specific angle."""
     channel_config = CHANNEL_RULES.get(channel)
     if not channel_config:
         raise ValueError(f"No config for channel: {channel}")
 
-    system_prompt = _build_system_prompt(channel, voice_settings)
+    system_prompt = _build_system_prompt(channel, voice_settings, assets=assets)
+
+    # Select the best signals for this channel
+    ranked_signals = _rank_signals_for_channel(signals, channel)
 
     signal_context = "\n\n".join(
-        f"[{s.get('type', 'unknown')}] {s.get('title', '')}\n{s.get('body', '')[:300]}"
-        for s in signals[:5]
+        f"[{s.get('type', 'unknown')}] {s.get('source', '')} — {s.get('title', '')}\n{s.get('body', '')[:400]}"
+        for s in ranked_signals
     )
 
     memory_block = _build_memory_block(memory, channel)
@@ -288,19 +456,25 @@ async def generate_content(brief: str, signals: list[dict], channel: ContentChan
     intel_block = _build_intelligence_block(memory)
     intel_section = f"\n\nCompany intelligence:\n{intel_block}" if intel_block else ""
 
+    # Get channel-specific angle from the brief
+    brief_text = brief.get("summary", "")
+    channel_angle = brief.get("channel_angles", {}).get(channel.value, "")
+    angle_line = f"\n\nEDITORIAL DIRECTION for this piece: {channel_angle}" if channel_angle else ""
+
     response = _get_client().messages.create(
         model=settings.claude_model,
         max_tokens=2000,
         system=system_prompt,
         messages=[{
             "role": "user",
-            "content": f"Daily brief:\n{brief}\n\nKey signals:\n{signal_context}{memory_section}{intel_section}\n\nGenerate the content now.",
+            "content": f"Today's editorial brief:\n{brief_text}\n\nSignals selected for this piece:\n{signal_context}{angle_line}{memory_section}{intel_section}\n\nWrite the {channel_config['headline_prefix']} now.",
         }],
     )
 
     body = response.content[0].text
-    lines = body.strip().split("\n")
-    headline = lines[0].strip().strip("#").strip('"').strip("*").strip()
+
+    # Better headline extraction
+    headline = _extract_headline(body, channel_config["headline_prefix"])
 
     return {
         "channel": channel,
@@ -309,11 +483,42 @@ async def generate_content(brief: str, signals: list[dict], channel: ContentChan
     }
 
 
-async def generate_all_content(brief: str, signals: list[dict],
+def _extract_headline(body: str, prefix: str) -> str:
+    """Extract headline from generated content — handles markdown, quotes, etc."""
+    lines = body.strip().split("\n")
+    for line in lines[:3]:  # check first 3 lines
+        clean = line.strip()
+        if not clean:
+            continue
+        # Strip markdown headers, quotes, bold markers
+        clean = clean.lstrip("#").strip().strip('"').strip("'").strip("*").strip("_").strip()
+        # Strip the channel prefix if the LLM echoed it (avoids "X THREAD  X THREAD: ...")
+        if prefix and clean.upper().startswith(prefix.upper()):
+            clean = clean[len(prefix):].lstrip(":").lstrip("-").strip()
+        # Also strip "Subject:" prefix from emails
+        if clean.lower().startswith("subject:"):
+            clean = clean[len("subject:"):].strip()
+        # Skip if it's a tweet number (for X threads)
+        if clean.startswith("1/") or clean.startswith("1."):
+            # For threads, use the first tweet content as headline
+            clean = clean.split("/", 1)[-1].strip() if "/" in clean else clean.split(".", 1)[-1].strip()
+        if len(clean) > 10:
+            return clean
+
+    # Fallback: first non-empty line
+    for line in lines:
+        if line.strip():
+            return line.strip()[:200]
+    return "Untitled"
+
+
+async def generate_all_content(brief: dict, signals: list[dict],
                                 channels: list[ContentChannel] | None = None,
                                 memory: dict | None = None,
-                                voice_settings: dict | None = None) -> list[dict]:
-    """Generate content across all channels (or specified subset)."""
+                                voice_settings: dict | None = None,
+                                assets: list[dict] | None = None) -> list[dict]:
+    """Generate content across all channels (or specified subset).
+    Each channel gets its own signal selection and editorial angle."""
     target_channels = channels or [
         ContentChannel.linkedin,
         ContentChannel.x_thread,
@@ -321,9 +526,168 @@ async def generate_all_content(brief: str, signals: list[dict],
         ContentChannel.blog,
     ]
 
+    # Filter out channels that the brief said to skip
+    channel_angles = brief.get("channel_angles", {})
+    if channel_angles:
+        # Keep channels that have angles OR weren't mentioned (generate anyway)
+        active_channels = []
+        for ch in target_channels:
+            ch_name = ch.value
+            if ch_name in channel_angles or ch_name not in ("release_email", "newsletter"):
+                active_channels.append(ch)
+            else:
+                log.info("Skipping %s — brief said SKIP", ch_name)
+        target_channels = active_channels or target_channels  # fallback to all if none left
+
     results = []
     for channel in target_channels:
-        result = await generate_content(brief, signals, channel, memory=memory, voice_settings=voice_settings)
+        result = await generate_content(brief, signals, channel, memory=memory, voice_settings=voice_settings, assets=assets)
         results.append(result)
 
     return results
+
+
+async def regenerate_single(content_body: str, channel: ContentChannel,
+                             feedback: str = "",
+                             memory: dict | None = None,
+                             voice_settings: dict | None = None) -> dict:
+    """Regenerate a single piece of content with optional editor feedback."""
+    channel_config = CHANNEL_RULES.get(channel)
+    if not channel_config:
+        raise ValueError(f"No config for channel: {channel}")
+
+    system_prompt = _build_system_prompt(channel, voice_settings)
+
+    feedback_line = f"\n\nEDITOR FEEDBACK: {feedback}\nRewrite to address this feedback." if feedback else "\nRewrite this piece with a fresh angle. Same topic, different approach."
+
+    response = _get_client().messages.create(
+        model=settings.claude_model,
+        max_tokens=2000,
+        system=system_prompt,
+        messages=[{
+            "role": "user",
+            "content": f"Here is a draft that needs revision:\n\n{content_body}{feedback_line}",
+        }],
+    )
+
+    body = response.content[0].text
+    headline = _extract_headline(body, channel_config["headline_prefix"])
+
+    return {
+        "channel": channel,
+        "headline": f"{channel_config['headline_prefix']}  {headline[:200]}",
+        "body": body,
+    }
+
+
+# ─── Story-based generation ─────────────────────────────
+
+async def generate_from_story(story: dict, dl, channels: list[str] | None = None) -> list[dict]:
+    """Generate content from a curated story — editorial context + curated signals.
+
+    Reuses the existing generate_content pipeline by packing the story's
+    editorial context into a synthetic brief dict.
+    """
+    from services.humanizer import humanize
+
+    story_signals = story.get("signals", [])
+    if not story_signals:
+        raise ValueError("Story has no signals — add signals before generating.")
+
+    # Build signal context with editor notes
+    signal_dicts = []
+    signal_parts = []
+    for ss in story_signals:
+        sig = ss.get("signal", ss)
+        signal_dicts.append(sig)
+        part = f"[{sig.get('type', 'unknown')}] {sig.get('source', '')} — {sig.get('title', '')}"
+        notes = ss.get("editor_notes", "")
+        if notes:
+            part += f"\nEDITOR NOTES: {notes}"
+        part += f"\n{sig.get('body', '')[:600]}"
+        signal_parts.append(part)
+
+    signal_summary = "\n\n".join(signal_parts)
+    editorial = f"STORY: {story.get('title', '')}"
+    if story.get("angle"):
+        editorial += f"\nANGLE: {story['angle']}"
+    if story.get("editorial_notes"):
+        editorial += f"\nEDITORIAL NOTES: {story['editorial_notes']}"
+    editorial += f"\n\nCURATED SIGNALS ({len(story_signals)}):\n{signal_summary}"
+
+    synthetic_brief = {
+        "summary": editorial,
+        "angle": story.get("angle", ""),
+        "channel_angles": {},
+    }
+
+    voice = await dl.get_voice_settings()
+    memory = await dl.get_memory_context()
+    assets = await dl.list_assets()
+
+    target_channels = None
+    if channels:
+        target_channels = [ContentChannel(c) for c in channels]
+
+    content_items = await generate_all_content(
+        synthetic_brief, signal_dicts, target_channels,
+        memory=memory, voice_settings=voice, assets=assets,
+    )
+
+    saved = []
+    for item in content_items:
+        raw_body = item["body"]
+        clean_body = humanize(raw_body)
+        result = await dl.save_content({
+            "story_id": story["id"],
+            "signal_id": signal_dicts[0].get("id") if signal_dicts else None,
+            "channel": item["channel"],
+            "status": "queued",
+            "headline": item["headline"],
+            "body": clean_body,
+            "body_raw": raw_body,
+            "author": "company",
+        })
+        saved.append(result)
+
+    await dl.commit()
+    return saved
+
+
+async def dig_deeper_signal(signal: dict, dl) -> dict:
+    """Fetch a signal's source URL, extract content, summarize key facts with Claude."""
+    url = signal.get("url", "")
+    if not url:
+        raise ValueError("Signal has no URL")
+
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        resp = await client.get(url, headers={"User-Agent": "Pressroom/0.1 (content-engine)"})
+        resp.raise_for_status()
+        html = resp.text
+
+    # Extract text
+    text = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', html, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()[:8000]
+
+    response = _get_client().messages.create(
+        model=settings.claude_model_fast,
+        max_tokens=1500,
+        system="You are a research analyst extracting key facts from a web page for editorial use. Be specific — pull exact quotes, numbers, data points, and key claims.",
+        messages=[{
+            "role": "user",
+            "content": f"URL: {url}\nOriginal signal: {signal.get('title', '')}\n\nFull page content:\n{text}\n\nExtract the key facts, quotes, data points, and arguments. Format as a concise deep dive summary with bullet points.",
+        }],
+    )
+
+    deep_dive = response.content[0].text
+    existing_body = signal.get("body", "")
+
+    new_body = existing_body
+    if "\n\n--- DEEP DIVE ---" in existing_body:
+        new_body = existing_body.split("\n\n--- DEEP DIVE ---")[0]
+    new_body += f"\n\n--- DEEP DIVE ---\n{deep_dive}"
+
+    updated = await dl.update_signal_body(signal["id"], new_body)
+    await dl.commit()
+    return updated or signal
