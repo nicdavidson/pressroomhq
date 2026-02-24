@@ -58,6 +58,7 @@ class Organization(Base):
     stories = relationship("Story", back_populates="org", cascade="all, delete-orphan")
     audits = relationship("AuditResult", back_populates="org", cascade="all, delete-orphan")
     team_members = relationship("TeamMember", back_populates="org", cascade="all, delete-orphan")
+    blog_posts = relationship("BlogPost", back_populates="org", cascade="all, delete-orphan")
 
 
 class Signal(Base):
@@ -229,6 +230,21 @@ class TeamMember(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     org = relationship("Organization", back_populates="team_members")
+
+
+class BlogPost(Base):
+    """Scraped blog post — context for the content engine."""
+    __tablename__ = "blog_posts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    url = Column(String(1000), nullable=False)
+    title = Column(String(500), default="")
+    excerpt = Column(Text, default="")
+    published_at = Column(DateTime, nullable=True)
+    scraped_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    org = relationship("Organization", back_populates="blog_posts")
 
 
 class Setting(Base):

@@ -273,6 +273,27 @@ async def onboard_apply(req: ApplyProfileRequest, dl: DataLayer = Depends(get_da
     except Exception:
         pass  # Non-fatal
 
+    # Auto-scrape blog if a blog asset was discovered
+    blog_scrape_count = 0
+    blog_assets = [
+        {"url": page_data.get("url", "") if isinstance(page_data, dict) else str(page_data)}
+        for label, page_data in crawl_pages.items()
+        if label in ("blog", "news", "articles")
+    ]
+    if blog_assets:
+        try:
+            from services.blog_scraper import scrape_blog_posts
+            for ba in blog_assets:
+                url = ba.get("url", "")
+                if not url:
+                    continue
+                posts = await scrape_blog_posts(url, days=30, api_key=api_key)
+                for p in posts:
+                    await dl.save_blog_post(p)
+                    blog_scrape_count += 1
+        except Exception:
+            pass  # Non-fatal — blog scrape is best-effort
+
     # Mark onboarding as complete
     await dl.set_setting("onboard_complete", "true")
     applied.append("onboard_complete")
@@ -283,7 +304,8 @@ async def onboard_apply(req: ApplyProfileRequest, dl: DataLayer = Depends(get_da
     from api.settings import _sync_to_runtime
     await _sync_to_runtime(dl)
 
-    return {"applied": applied, "count": len(applied), "org_id": org_id, "org": org}
+    return {"applied": applied, "count": len(applied), "org_id": org_id, "org": org,
+            "blog_posts_scraped": blog_scrape_count}
 
 
 @router.get("/status")

@@ -12,7 +12,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import (Signal, Brief, Content, Setting, Organization, DataSource, TeamMember,
-                    CompanyAsset, Story, StorySignal, ApiKey, AuditResult,
+                    CompanyAsset, Story, StorySignal, ApiKey, AuditResult, BlogPost,
                     SignalType, ContentChannel, ContentStatus, StoryStatus)
 from services.df_client import df
 
@@ -969,6 +969,46 @@ class DataLayer:
             for s in result.scalars().all()
         ]
 
+    # ──────────────────────────────────────
+    # Blog Posts
+    # ──────────────────────────────────────
+
+    async def save_blog_post(self, data: dict) -> dict:
+        published_at = data.get("published_at")
+        if isinstance(published_at, str):
+            try:
+                published_at = datetime.datetime.fromisoformat(published_at)
+            except (ValueError, TypeError):
+                published_at = None
+        bp = BlogPost(
+            org_id=self.org_id,
+            url=data.get("url", ""),
+            title=data.get("title", ""),
+            excerpt=data.get("excerpt", ""),
+            published_at=published_at,
+        )
+        self.db.add(bp)
+        await self.db.flush()
+        return _serialize_blog_post(bp)
+
+    async def list_blog_posts(self, limit: int = 50) -> list[dict]:
+        query = select(BlogPost).order_by(BlogPost.scraped_at.desc()).limit(limit)
+        if self.org_id:
+            query = query.where(BlogPost.org_id == self.org_id)
+        result = await self.db.execute(query)
+        return [_serialize_blog_post(bp) for bp in result.scalars().all()]
+
+    async def delete_blog_post(self, post_id: int) -> bool:
+        query = select(BlogPost).where(BlogPost.id == post_id)
+        if self.org_id:
+            query = query.where(BlogPost.org_id == self.org_id)
+        result = await self.db.execute(query)
+        bp = result.scalar_one_or_none()
+        if not bp:
+            return False
+        await self.db.delete(bp)
+        return True
+
     async def commit(self):
         await self.db.commit()
 
@@ -1028,4 +1068,13 @@ def _serialize_team_member(m: TeamMember) -> dict:
         "linkedin_url": m.linkedin_url, "email": m.email,
         "expertise_tags": tags,
         "created_at": m.created_at.isoformat() if m.created_at else None,
+    }
+
+
+def _serialize_blog_post(bp: BlogPost) -> dict:
+    return {
+        "id": bp.id, "org_id": bp.org_id, "url": bp.url,
+        "title": bp.title, "excerpt": bp.excerpt,
+        "published_at": bp.published_at.isoformat() if bp.published_at else None,
+        "scraped_at": bp.scraped_at.isoformat() if bp.scraped_at else None,
     }

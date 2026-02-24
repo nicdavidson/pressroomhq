@@ -9,6 +9,7 @@ import Audit from './components/Audit'
 import Assets from './components/Assets'
 import StoryWorkbench from './components/StoryWorkbench'
 import Team from './components/Team'
+import Blog from './components/Blog'
 
 const API = '/api'
 
@@ -402,6 +403,7 @@ export default function App() {
             <button className={`nav-tab ${view === 'scout' ? 'active' : ''}`} onClick={() => setView('scout')}>Scout</button>
             <button className={`nav-tab ${view === 'voice' ? 'active' : ''}`} onClick={() => setView('voice')}>Voice</button>
             <button className={`nav-tab ${view === 'import' ? 'active' : ''}`} onClick={() => setView('import')}>Import</button>
+            <button className={`nav-tab ${view === 'blog' ? 'active' : ''}`} onClick={() => setView('blog')}>Blog</button>
             <button className={`nav-tab ${view === 'connections' ? 'active' : ''}`} onClick={() => setView('connections')}>Connect</button>
             <button className={`nav-tab ${view === 'assets' ? 'active' : ''}`} onClick={() => setView('assets')}>Assets</button>
             <button className={`nav-tab ${view === 'team' ? 'active' : ''}`} onClick={() => setView('team')}>Team</button>
@@ -462,13 +464,14 @@ export default function App() {
 
         {/* MAIN CONTENT */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          {(view === 'settings' || view === 'voice' || view === 'scout' || view === 'import' || view === 'onboard' || view === 'connections' || view === 'audit' || view === 'assets' || view === 'team') && (
+          {(view === 'settings' || view === 'voice' || view === 'scout' || view === 'import' || view === 'blog' || view === 'onboard' || view === 'connections' || view === 'audit' || view === 'assets' || view === 'team') && (
             <div className="pressroom" style={{ gridTemplateColumns: '1fr' }}>
               <div className="desk-area" style={{ gridTemplateRows: '1fr 220px' }}>
                 {view === 'settings' && <Settings onLog={log} orgId={orgId} />}
                 {view === 'voice' && <Voice onLog={log} orgId={orgId} />}
                 {view === 'scout' && <Scout onLog={log} orgId={orgId} />}
                 {view === 'import' && <Import onLog={log} orgId={orgId} />}
+                {view === 'blog' && <Blog orgId={orgId} />}
                 {view === 'onboard' && <Onboard onLog={log} onComplete={onOnboardComplete} />}
                 {view === 'connections' && <Connections onLog={log} orgId={orgId} />}
                 {view === 'audit' && <Audit onLog={log} orgId={orgId} />}
