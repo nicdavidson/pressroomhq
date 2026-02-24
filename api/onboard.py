@@ -247,6 +247,30 @@ async def onboard_apply(req: ApplyProfileRequest, dl: DataLayer = Depends(get_da
         })
         asset_count += 1
 
+    # Build company_properties from discovered crawl pages
+    prop_map = {
+        "docs": ("docs", "documentation", "api", "reference", "guides", "sub:docs", "sub:developers", "sub:api"),
+        "support": ("contact", "support", "help", "sub:help", "sub:support"),
+        "pricing": ("pricing",),
+        "careers": ("careers", "jobs", "hiring"),
+        "customers": ("customers", "case-studies", "testimonials"),
+        "changelog": ("changelog", "releases", "whats-new"),
+        "status": ("sub:status",),
+        "newsletter": ("newsletter", "subscribe"),
+    }
+    props = {}
+    for prop_key, labels in prop_map.items():
+        for label in labels:
+            if label in crawl_pages:
+                page_data = crawl_pages[label]
+                url = page_data.get("url", "") if isinstance(page_data, dict) else str(page_data)
+                if url:
+                    props[prop_key] = url
+                    break
+    if props:
+        await dl.set_setting("company_properties", json.dumps(props))
+        applied.append("company_properties")
+
     # Social profiles → assets
     if socials and isinstance(socials, dict):
         for platform, url in socials.items():

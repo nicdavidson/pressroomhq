@@ -74,6 +74,7 @@ DEFAULTS = {
     "onboard_competitors": "[]",
     "onboard_complete": "",
     "social_profiles": "{}",
+    "company_properties": "{}",
     "df_service_map": "",
     # Slack notifications
     "slack_webhook_url": "",

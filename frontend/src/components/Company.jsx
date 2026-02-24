@@ -45,6 +45,7 @@ export default function Company({ orgId, onLog }) {
   const [topics, setTopics] = useState([])
   const [competitors, setCompetitors] = useState([])
   const [socials, setSocials] = useState({ linkedin: '', x: '', github: '', blog: '', facebook: '', instagram: '', youtube: '' })
+  const [properties, setProperties] = useState({ docs: '', support: '', careers: '', customers: '', pricing: '', changelog: '', status: '', newsletter: '' })
   const [ghOrgs, setGhOrgs] = useState([])
   const [saving, setSaving] = useState(null) // which section is saving
   const [syncing, setSyncing] = useState(false)
@@ -86,6 +87,11 @@ export default function Company({ orgId, onLog }) {
           youtube: sp.youtube || '',
         })
       } catch { /* keep defaults */ }
+
+      try {
+        const cp = JSON.parse(data.company_properties?.value || '{}')
+        setProperties(prev => ({ ...prev, ...cp }))
+      } catch { /* keep defaults */ }
     } catch { /* ignore */ }
   }, [orgId])
 
@@ -119,6 +125,10 @@ export default function Company({ orgId, onLog }) {
 
   const saveSocials = () => saveSection('socials', {
     social_profiles: JSON.stringify(socials),
+  })
+
+  const saveProperties = () => saveSection('properties', {
+    company_properties: JSON.stringify(properties),
   })
 
   const saveOrgs = () => saveSection('orgs', {
@@ -286,6 +296,41 @@ export default function Company({ orgId, onLog }) {
         <div style={{ marginTop: 12, textAlign: 'right' }}>
           <button className={`btn btn-approve ${saving === 'socials' ? 'loading' : ''}`} onClick={saveSocials} disabled={!!saving}>
             {saving === 'socials' ? 'Saving...' : 'Save Socials'}
+          </button>
+        </div>
+      </div>
+
+      {/* DIGITAL PROPERTIES */}
+      <div className="settings-section">
+        <div className="section-label">Digital Properties</div>
+        <p style={{ color: 'var(--text-dim)', fontSize: 12, margin: '0 0 8px' }}>
+          Key URLs for your company's web presence. Auto-discovered during onboarding, editable here. Drives the company audit.
+        </p>
+        <div className="company-field-grid">
+          {[
+            { key: 'docs', label: 'Documentation', ph: 'https://docs.acme.com' },
+            { key: 'support', label: 'Support / Help', ph: 'https://support.acme.com' },
+            { key: 'pricing', label: 'Pricing', ph: 'https://acme.com/pricing' },
+            { key: 'careers', label: 'Careers', ph: 'https://acme.com/careers' },
+            { key: 'customers', label: 'Customers / Cases', ph: 'https://acme.com/customers' },
+            { key: 'changelog', label: 'Changelog', ph: 'https://acme.com/changelog' },
+            { key: 'status', label: 'Status Page', ph: 'https://status.acme.com' },
+            { key: 'newsletter', label: 'Newsletter', ph: 'https://acme.com/newsletter' },
+          ].map(p => (
+            <div key={p.key} className="company-field">
+              <label className="company-field-label">{p.label}</label>
+              <input
+                className="setting-input"
+                value={properties[p.key]}
+                onChange={e => setProperties(prev => ({ ...prev, [p.key]: e.target.value }))}
+                placeholder={p.ph}
+              />
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop: 12, textAlign: 'right' }}>
+          <button className={`btn btn-approve ${saving === 'properties' ? 'loading' : ''}`} onClick={saveProperties} disabled={!!saving}>
+            {saving === 'properties' ? 'Saving...' : 'Save Properties'}
           </button>
         </div>
       </div>

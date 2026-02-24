@@ -78,6 +78,7 @@ async def _gather_company_snapshot(dl: DataLayer) -> dict:
         "golden_anchor": all_settings.get("golden_anchor", ""),
         "voice_persona": all_settings.get("voice_persona", ""),
         "social_profiles": all_settings.get("social_profiles", "{}"),
+        "company_properties": all_settings.get("company_properties", "{}"),
         "assets": {t: [{"url": a["url"], "label": a.get("label", "")} for a in items] for t, items in asset_types.items()},
         "asset_count": len(assets),
         "blog_posts": blog_posts,
@@ -121,14 +122,15 @@ Produce a JSON array of findings. Each finding should have:
 - "metric": optional supporting number or fact (null if not applicable)
 
 Focus on:
-1. Missing digital properties (no blog, no docs, no GitHub presence, missing social accounts)
-2. Content gaps (no video content, only one channel, no email/newsletter)
-3. Stale or thin content (old blog posts, few signals, low content volume)
-4. SEO red flags (no documented domain, missing key assets)
-5. Brand/voice gaps (no golden anchor, no persona defined, no competitors mapped)
-6. Signal monitoring gaps (few scout sources, missing major platforms)
-7. Integration gaps (no LinkedIn connected, no HubSpot, no publishing pipeline)
-8. Team gaps (no team members, missing bios/expertise)
+1. Missing digital properties — check company_properties for empty values (no docs, no support page, no pricing, no careers page, no changelog, no status page, no newsletter). Each empty property is a gap worth flagging.
+2. Missing social accounts — check social_profiles for empty values (no LinkedIn, no YouTube, no blog URL, etc.)
+3. Content gaps (no video content, only one channel, no email/newsletter)
+4. Stale or thin content (old blog posts, few signals, low content volume)
+5. SEO red flags (no documented domain, missing key assets)
+6. Brand/voice gaps (no golden anchor, no persona defined, no competitors mapped)
+7. Signal monitoring gaps (few scout sources, missing major platforms)
+8. Integration gaps (no LinkedIn connected, no HubSpot, no publishing pipeline)
+9. Team gaps (no team members, missing bios/expertise)
 
 Be specific and actionable. Prioritize the 8-15 most impactful findings.
 Return ONLY the JSON array, no markdown wrapping."""
