@@ -2286,3 +2286,116 @@ select.setting-input {
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border); }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+/* ═══ SOURCE ATTRIBUTION (content cards) ═══ */
+.card-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px dotted var(--border);
+}
+
+.card-sources-label {
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  margin-right: 4px;
+}
+
+.card-source-tag {
+  font-size: 9px;
+  color: var(--amber-dim);
+  border: 1px solid rgba(204, 136, 0, 0.3);
+  padding: 1px 5px;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ═══ SIGNAL PERFORMANCE TABLE ═══ */
+.perf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-top: 8px;
+}
+
+.perf-table th {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--amber-dim);
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--amber-dim);
+  font-weight: normal;
+}
+
+.perf-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(51, 51, 48, 0.5);
+  color: var(--text);
+}
+
+.perf-table tr:hover td {
+  background: var(--bg-panel);
+}
+
+.perf-type {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--amber);
+  width: 70px;
+}
+
+.perf-title {
+  color: var(--text-bright);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.perf-num {
+  text-align: center;
+  font-family: var(--font-mono);
+  width: 60px;
+}
+
+.perf-spike {
+  color: var(--text-dim);
+}
+
+.perf-rate-ok {
+  color: var(--green);
+}
+
+.perf-rate-bad {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.perf-row-hot td {
+  background: rgba(255, 68, 68, 0.05);
+}
+
+.perf-row-hot .perf-type {
+  color: var(--red);
+}
+
+.perf-warning {
+  font-size: 10px;
+  color: var(--red);
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px solid rgba(255, 68, 68, 0.3);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}

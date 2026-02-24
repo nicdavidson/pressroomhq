@@ -46,6 +46,17 @@ async def content_action(content_id: int, req: ActionRequest, dl: DataLayer = De
     if req.action not in ("approve", "spike"):
         raise HTTPException(status_code=400, detail=f"Unknown action: {req.action}")
 
-    result = await dl.update_content_status(content_id, "approved" if req.action == "approve" else "spiked")
+    new_status = "approved" if req.action == "approve" else "spiked"
+    result = await dl.update_content_status(content_id, new_status)
+
+    # When content is spiked, increment spike count on each source signal
+    if req.action == "spike":
+        source_ids = (c.get("source_signal_ids", "") or "").strip()
+        if source_ids:
+            for sid in source_ids.split(","):
+                sid = sid.strip()
+                if sid and sid.isdigit():
+                    await dl.increment_signal_spikes(int(sid))
+
     await dl.commit()
     return result

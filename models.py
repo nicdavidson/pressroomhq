@@ -71,6 +71,8 @@ class Signal(Base):
     url = Column(String(1000), default="")
     raw_data = Column(Text, default="")
     prioritized = Column(Integer, default=0)  # 1 = editor-prioritized for content gen
+    times_used = Column(Integer, default=0)  # how many content pieces used this signal
+    times_spiked = Column(Integer, default=0)  # how many times content from this signal was spiked
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     org = relationship("Organization", back_populates="signals")
@@ -109,6 +111,7 @@ class Content(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     approved_at = Column(DateTime, nullable=True)
     published_at = Column(DateTime, nullable=True)
+    source_signal_ids = Column(Text, default="")  # comma-separated signal IDs that fed this content
 
     org = relationship("Organization", back_populates="contents")
     signal = relationship("Signal", back_populates="contents")

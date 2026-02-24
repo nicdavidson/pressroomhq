@@ -373,6 +373,13 @@ export default function App() {
     }
   }
 
+  // Build a signal lookup map for source attribution on content cards
+  const signalMap = useMemo(() => {
+    const m = {}
+    signals.forEach(s => { m[s.id] = s })
+    return m
+  }, [signals])
+
   const queuedCount = queue.length
   const approvedCount = allContent.filter(c => c.status === 'approved').length
   const publishedCount = allContent.filter(c => c.status === 'published').length
@@ -591,6 +598,21 @@ export default function App() {
                       >
                         {c.body}
                       </div>
+                      {/* Source attribution tags */}
+                      {c.source_signal_ids && c.source_signal_ids.trim() && (
+                        <div className="card-sources">
+                          <span className="card-sources-label">SRC</span>
+                          {c.source_signal_ids.split(',').map(sid => sid.trim()).filter(Boolean).map(sid => {
+                            const sig = signalMap[Number(sid)]
+                            if (!sig) return null
+                            return (
+                              <span key={sid} className="card-source-tag">
+                                [{signalTag(sig.type)}] {sig.title?.slice(0, 40)}{sig.title?.length > 40 ? '...' : ''}
+                              </span>
+                            )
+                          })}
+                        </div>
+                      )}
                       <div className="card-actions">
                         {c.status === 'queued' && !loading[`card-${c.id}`] && (
                           <>
