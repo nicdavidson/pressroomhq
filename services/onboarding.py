@@ -256,23 +256,33 @@ _SOCIAL_PATTERNS = {
     "x": r'https?://(?:www\.)?(?:twitter\.com|x\.com)/[^\s"\'<>]+',
     "facebook": r'https?://(?:www\.)?facebook\.com/[^\s"\'<>]+',
     "instagram": r'https?://(?:www\.)?instagram\.com/[^\s"\'<>]+',
-    "youtube": r'https?://(?:www\.)?youtube\.com/(?:@|channel/|c/)[^\s"\'<>]+',
+    "youtube": r'https?://(?:www\.)?youtube\.com/(?:@|channel/|c/|user/)[^\s"\'<>]+',
     "github": r'https?://(?:www\.)?github\.com/[^\s"\'<>]+',
     "tiktok": r'https?://(?:www\.)?tiktok\.com/@[^\s"\'<>]+',
 }
 
 
+_SOCIAL_SKIP = ('/sharer', '/intent/', '/share?', '/dialog/', '/embed/', '/watch?', '/playlist?')
+
+
 def _extract_social_links(html: str) -> dict[str, str]:
-    """Pull social media profile URLs from page HTML."""
+    """Pull social media profile URLs from page HTML.
+
+    Finds ALL matches per platform, skips share/intent/embed links,
+    and keeps the shortest (most canonical) URL.
+    """
     found = {}
     for platform, pattern in _SOCIAL_PATTERNS.items():
-        match = re.search(pattern, html, re.IGNORECASE)
-        if match:
-            url = match.group(0).rstrip('/')
-            # Skip generic share/intent links
-            if any(skip in url.lower() for skip in ['/sharer', '/intent/', '/share?', '/dialog/']):
+        matches = re.findall(pattern, html, re.IGNORECASE)
+        candidates = []
+        for url in matches:
+            url = url.rstrip('/')
+            if any(skip in url.lower() for skip in _SOCIAL_SKIP):
                 continue
-            found[platform] = url
+            candidates.append(url)
+        if candidates:
+            # Shortest URL is usually the canonical profile link
+            found[platform] = min(candidates, key=len)
     return found
 
 
@@ -321,9 +331,14 @@ async def crawl_domain(domain: str) -> dict:
             try:
                 resp = await c.get(url, headers=headers)
                 if resp.status_code == 200:
-                    text = _extract_text(resp.text)
+                    page_html = resp.text
+                    text = _extract_text(page_html)
                     if text and len(text) > 50:
                         pages[label] = {"url": url, "text": text[:5000]}
+                    # Extract social links from every crawled page (fill gaps)
+                    for platform, surl in _extract_social_links(page_html).items():
+                        if platform not in socials:
+                            socials[platform] = surl
             except Exception:
                 continue
 
