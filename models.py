@@ -57,6 +57,7 @@ class Organization(Base):
     assets = relationship("CompanyAsset", back_populates="org", cascade="all, delete-orphan")
     stories = relationship("Story", back_populates="org", cascade="all, delete-orphan")
     audits = relationship("AuditResult", back_populates="org", cascade="all, delete-orphan")
+    team_members = relationship("TeamMember", back_populates="org", cascade="all, delete-orphan")
 
 
 class Signal(Base):
@@ -207,6 +208,24 @@ class AuditResult(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     org = relationship("Organization", back_populates="audits")
+
+
+class TeamMember(Base):
+    """Discovered or manually added team member."""
+    __tablename__ = "team_members"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    name = Column(String(255), nullable=False)
+    title = Column(String(255), default="")
+    bio = Column(Text, default="")
+    photo_url = Column(String(1000), default="")
+    linkedin_url = Column(String(1000), default="")
+    email = Column(String(255), default="")
+    expertise_tags = Column(Text, default="[]")  # JSON array of strings
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    org = relationship("Organization", back_populates="team_members")
 
 
 class Setting(Base):

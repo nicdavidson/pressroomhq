@@ -11,7 +11,7 @@ import json
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import (Signal, Brief, Content, Setting, Organization, DataSource,
+from models import (Signal, Brief, Content, Setting, Organization, DataSource, TeamMember,
                     CompanyAsset, Story, StorySignal, ApiKey, AuditResult,
                     SignalType, ContentChannel, ContentStatus, StoryStatus)
 from services.df_client import df
@@ -860,6 +860,62 @@ class DataLayer:
         await self.db.delete(a)
         return True
 
+    # ──────────────────────────────────────
+    # Team Members
+    # ──────────────────────────────────────
+
+    async def save_team_member(self, data: dict) -> dict:
+        tags = data.get("expertise_tags", [])
+        if isinstance(tags, list):
+            tags = json.dumps(tags)
+        member = TeamMember(
+            org_id=self.org_id,
+            name=data["name"],
+            title=data.get("title", ""),
+            bio=data.get("bio", ""),
+            photo_url=data.get("photo_url", ""),
+            linkedin_url=data.get("linkedin_url", ""),
+            email=data.get("email", ""),
+            expertise_tags=tags,
+        )
+        self.db.add(member)
+        await self.db.flush()
+        return _serialize_team_member(member)
+
+    async def list_team_members(self) -> list[dict]:
+        query = select(TeamMember).order_by(TeamMember.name)
+        if self.org_id:
+            query = query.where(TeamMember.org_id == self.org_id)
+        result = await self.db.execute(query)
+        return [_serialize_team_member(m) for m in result.scalars().all()]
+
+    async def update_team_member(self, member_id: int, **fields) -> dict | None:
+        query = select(TeamMember).where(TeamMember.id == member_id)
+        if self.org_id:
+            query = query.where(TeamMember.org_id == self.org_id)
+        result = await self.db.execute(query)
+        m = result.scalar_one_or_none()
+        if not m:
+            return None
+        for field, value in fields.items():
+            if field == "expertise_tags" and isinstance(value, list):
+                value = json.dumps(value)
+            if hasattr(m, field):
+                setattr(m, field, value)
+        await self.db.flush()
+        return _serialize_team_member(m)
+
+    async def delete_team_member(self, member_id: int) -> bool:
+        query = select(TeamMember).where(TeamMember.id == member_id)
+        if self.org_id:
+            query = query.where(TeamMember.org_id == self.org_id)
+        result = await self.db.execute(query)
+        m = result.scalar_one_or_none()
+        if not m:
+            return False
+        await self.db.delete(m)
+        return True
+
     async def commit(self):
         await self.db.commit()
 
@@ -902,4 +958,20 @@ def _serialize_audit(a: AuditResult) -> dict:
         "target": a.target, "score": a.score, "total_issues": a.total_issues,
         "result": json.loads(a.result_json) if a.result_json else {},
         "created_at": a.created_at.isoformat() if a.created_at else None,
+    }
+
+
+def _serialize_team_member(m: TeamMember) -> dict:
+    tags = m.expertise_tags or "[]"
+    if isinstance(tags, str):
+        try:
+            tags = json.loads(tags)
+        except (json.JSONDecodeError, ValueError):
+            tags = []
+    return {
+        "id": m.id, "org_id": m.org_id, "name": m.name,
+        "title": m.title, "bio": m.bio, "photo_url": m.photo_url,
+        "linkedin_url": m.linkedin_url, "email": m.email,
+        "expertise_tags": tags,
+        "created_at": m.created_at.isoformat() if m.created_at else None,
     }

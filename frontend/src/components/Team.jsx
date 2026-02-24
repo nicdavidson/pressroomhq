@@ -1,0 +1,274 @@
+import { useState, useEffect, useCallback } from 'react'
+
+const API = '/api'
+
+export default function Team({ orgId }) {
+  const [members, setMembers] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [discovering, setDiscovering] = useState(false)
+  const [discoverResult, setDiscoverResult] = useState(null)
+  const [showAdd, setShowAdd] = useState(false)
+  const [newMember, setNewMember] = useState({ name: '', title: '', bio: '', email: '', expertise_tags: '' })
+  const [editingId, setEditingId] = useState(null)
+  const [editFields, setEditFields] = useState({})
+
+  const headers = { 'Content-Type': 'application/json', ...(orgId ? { 'X-Org-Id': String(orgId) } : {}) }
+
+  const fetchMembers = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/team`, { headers })
+      const data = await res.json()
+      setMembers(Array.isArray(data) ? data : [])
+    } catch { /* ignore */ }
+    setLoading(false)
+  }, [orgId])
+
+  useEffect(() => { fetchMembers() }, [fetchMembers])
+
+  const discover = async () => {
+    setDiscovering(true)
+    setDiscoverResult(null)
+    try {
+      const res = await fetch(`${API}/team/discover`, { method: 'POST', headers })
+      const data = await res.json()
+      setDiscoverResult(data)
+      if (data.members?.length > 0 || data.saved > 0) {
+        fetchMembers()
+      }
+    } catch (e) {
+      setDiscoverResult({ error: e.message })
+    }
+    setDiscovering(false)
+  }
+
+  const addMember = async () => {
+    if (!newMember.name.trim()) return
+    const tags = newMember.expertise_tags
+      ? newMember.expertise_tags.split(',').map(t => t.trim()).filter(Boolean)
+      : []
+    await fetch(`${API}/team`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ ...newMember, expertise_tags: tags }),
+    })
+    setNewMember({ name: '', title: '', bio: '', email: '', expertise_tags: '' })
+    setShowAdd(false)
+    fetchMembers()
+  }
+
+  const startEdit = (member) => {
+    setEditingId(member.id)
+    setEditFields({ name: member.name, title: member.title })
+  }
+
+  const saveEdit = async (id) => {
+    await fetch(`${API}/team/${id}`, {
+      method: 'PUT', headers,
+      body: JSON.stringify(editFields),
+    })
+    setEditingId(null)
+    fetchMembers()
+  }
+
+  const deleteMember = async (id) => {
+    await fetch(`${API}/team/${id}`, { method: 'DELETE', headers })
+    fetchMembers()
+  }
+
+  if (loading) return <div className="settings-page"><p style={{ color: 'var(--text-dim)' }}>Loading team...</p></div>
+
+  return (
+    <div className="settings-page">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+        <h2 className="settings-title" style={{ margin: 0 }}>Team Members</h2>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            className="btn btn-run"
+            onClick={discover}
+            disabled={discovering}
+          >
+            {discovering ? 'Discovering...' : 'Discover Team'}
+          </button>
+          <button className="btn btn-approve" onClick={() => setShowAdd(!showAdd)}>
+            {showAdd ? 'Cancel' : '+ Add Member'}
+          </button>
+        </div>
+      </div>
+
+      {discoverResult && (
+        <div style={{
+          padding: '10px 14px', marginBottom: 16,
+          border: '1px solid var(--border)',
+          background: 'var(--bg-card)',
+          fontSize: 12, lineHeight: 1.5,
+        }}>
+          {discoverResult.error ? (
+            <span style={{ color: 'var(--error)' }}>Discovery failed: {discoverResult.error}</span>
+          ) : discoverResult.message ? (
+            <span style={{ color: 'var(--text-dim)' }}>{discoverResult.message}</span>
+          ) : (
+            <span>
+              Found {discoverResult.total_found} members — saved {discoverResult.saved}, skipped {discoverResult.skipped_duplicates} duplicates.
+              {discoverResult.pages_checked?.length > 0 && (
+                <span style={{ color: 'var(--text-dim)' }}> Checked: {discoverResult.pages_checked.join(', ')}</span>
+              )}
+            </span>
+          )}
+          <button
+            style={{ marginLeft: 12, cursor: 'pointer', background: 'none', border: 'none', color: 'var(--text-dim)', fontSize: 14 }}
+            onClick={() => setDiscoverResult(null)}
+          >&times;</button>
+        </div>
+      )}
+
+      {showAdd && (
+        <div className="asset-add-form" style={{ flexWrap: 'wrap' }}>
+          <input
+            className="setting-input"
+            placeholder="Name *"
+            value={newMember.name}
+            onChange={e => setNewMember(p => ({ ...p, name: e.target.value }))}
+            style={{ flex: '1 1 180px' }}
+          />
+          <input
+            className="setting-input"
+            placeholder="Title"
+            value={newMember.title}
+            onChange={e => setNewMember(p => ({ ...p, title: e.target.value }))}
+            style={{ flex: '1 1 180px' }}
+          />
+          <input
+            className="setting-input"
+            placeholder="Email"
+            value={newMember.email}
+            onChange={e => setNewMember(p => ({ ...p, email: e.target.value }))}
+            style={{ flex: '1 1 180px' }}
+          />
+          <input
+            className="setting-input"
+            placeholder="Expertise (comma-separated)"
+            value={newMember.expertise_tags}
+            onChange={e => setNewMember(p => ({ ...p, expertise_tags: e.target.value }))}
+            style={{ flex: '1 1 240px' }}
+          />
+          <button className="btn btn-approve" onClick={addMember} disabled={!newMember.name.trim()}>Add</button>
+        </div>
+      )}
+
+      {members.length === 0 ? (
+        <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-dim)' }}>
+          <p style={{ fontSize: 14, marginBottom: 8 }}>No team members found.</p>
+          <p style={{ fontSize: 12 }}>Click <strong>Discover Team</strong> to scan your site, or add manually.</p>
+        </div>
+      ) : (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+          gap: 12,
+        }}>
+          {members.map(m => (
+            <div key={m.id} style={{
+              border: '1px solid var(--border)',
+              background: 'var(--bg-card)',
+              padding: 14,
+              display: 'flex', flexDirection: 'column', gap: 6,
+            }}>
+              {/* Photo placeholder + name/title */}
+              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <div style={{
+                  width: 44, height: 44, borderRadius: '50%',
+                  background: 'var(--border)', flexShrink: 0,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 16, color: 'var(--text-dim)',
+                  overflow: 'hidden',
+                }}>
+                  {m.photo_url ? (
+                    <img src={m.photo_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  ) : (
+                    m.name?.charAt(0)?.toUpperCase() || '?'
+                  )}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {editingId === m.id ? (
+                    <>
+                      <input
+                        className="setting-input"
+                        value={editFields.name}
+                        onChange={e => setEditFields(p => ({ ...p, name: e.target.value }))}
+                        style={{ fontSize: 13, marginBottom: 4, width: '100%' }}
+                        autoFocus
+                      />
+                      <input
+                        className="setting-input"
+                        value={editFields.title}
+                        onChange={e => setEditFields(p => ({ ...p, title: e.target.value }))}
+                        style={{ fontSize: 11, width: '100%' }}
+                        onKeyDown={e => e.key === 'Enter' && saveEdit(m.id)}
+                      />
+                      <div style={{ marginTop: 4, display: 'flex', gap: 6 }}>
+                        <button className="btn btn-approve" style={{ fontSize: 10, padding: '2px 8px' }} onClick={() => saveEdit(m.id)}>Save</button>
+                        <button className="btn" style={{ fontSize: 10, padding: '2px 8px', color: 'var(--text-dim)', borderColor: 'var(--border)' }} onClick={() => setEditingId(null)}>Cancel</button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div
+                        style={{ fontWeight: 600, fontSize: 13, cursor: 'pointer', lineHeight: 1.2 }}
+                        onClick={() => startEdit(m)}
+                        title="Click to edit"
+                      >
+                        {m.name}
+                      </div>
+                      {m.title && (
+                        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>{m.title}</div>
+                      )}
+                    </>
+                  )}
+                </div>
+                <button
+                  style={{
+                    background: 'none', border: 'none', color: 'var(--text-dim)',
+                    cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: 0,
+                  }}
+                  onClick={() => deleteMember(m.id)}
+                  title="Remove member"
+                >&times;</button>
+              </div>
+
+              {/* Bio */}
+              {m.bio && (
+                <div style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.4 }}>
+                  {m.bio.length > 150 ? m.bio.slice(0, 150) + '...' : m.bio}
+                </div>
+              )}
+
+              {/* Expertise tags */}
+              {m.expertise_tags?.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
+                  {m.expertise_tags.map((tag, i) => (
+                    <span key={i} style={{
+                      fontSize: 10, padding: '1px 6px',
+                      border: '1px solid var(--border)',
+                      color: 'var(--accent)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.5px',
+                    }}>{tag}</span>
+                  ))}
+                </div>
+              )}
+
+              {/* Links */}
+              <div style={{ display: 'flex', gap: 8, fontSize: 10, marginTop: 2 }}>
+                {m.linkedin_url && (
+                  <a href={m.linkedin_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>LinkedIn</a>
+                )}
+                {m.email && (
+                  <a href={`mailto:${m.email}`} style={{ color: 'var(--accent)' }}>{m.email}</a>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
