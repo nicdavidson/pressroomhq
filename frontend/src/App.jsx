@@ -9,6 +9,7 @@ import Audit from './components/Audit'
 import Assets from './components/Assets'
 import StoryWorkbench from './components/StoryWorkbench'
 import Team from './components/Team'
+import HubSpot from './components/HubSpot'
 
 const API = '/api'
 
@@ -403,6 +404,7 @@ export default function App() {
             <button className={`nav-tab ${view === 'voice' ? 'active' : ''}`} onClick={() => setView('voice')}>Voice</button>
             <button className={`nav-tab ${view === 'import' ? 'active' : ''}`} onClick={() => setView('import')}>Import</button>
             <button className={`nav-tab ${view === 'connections' ? 'active' : ''}`} onClick={() => setView('connections')}>Connect</button>
+            <button className={`nav-tab ${view === 'hubspot' ? 'active' : ''}`} onClick={() => setView('hubspot')}>HubSpot</button>
             <button className={`nav-tab ${view === 'assets' ? 'active' : ''}`} onClick={() => setView('assets')}>Assets</button>
             <button className={`nav-tab ${view === 'team' ? 'active' : ''}`} onClick={() => setView('team')}>Team</button>
             <button className={`nav-tab ${view === 'stories' ? 'active' : ''}`} onClick={() => setView('stories')}>Stories</button>
@@ -462,7 +464,7 @@ export default function App() {
 
         {/* MAIN CONTENT */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          {(view === 'settings' || view === 'voice' || view === 'scout' || view === 'import' || view === 'onboard' || view === 'connections' || view === 'audit' || view === 'assets' || view === 'team') && (
+          {(view === 'settings' || view === 'voice' || view === 'scout' || view === 'import' || view === 'onboard' || view === 'connections' || view === 'hubspot' || view === 'audit' || view === 'assets' || view === 'team') && (
             <div className="pressroom" style={{ gridTemplateColumns: '1fr' }}>
               <div className="desk-area" style={{ gridTemplateRows: '1fr 220px' }}>
                 {view === 'settings' && <Settings onLog={log} orgId={orgId} />}
@@ -471,6 +473,7 @@ export default function App() {
                 {view === 'import' && <Import onLog={log} orgId={orgId} />}
                 {view === 'onboard' && <Onboard onLog={log} onComplete={onOnboardComplete} />}
                 {view === 'connections' && <Connections onLog={log} orgId={orgId} />}
+                {view === 'hubspot' && <HubSpot onLog={log} orgId={orgId} />}
                 {view === 'audit' && <Audit onLog={log} orgId={orgId} />}
                 {view === 'assets' && <Assets orgId={orgId} />}
                 {view === 'team' && <Team orgId={orgId} />}
