@@ -60,6 +60,7 @@ class Organization(Base):
     team_members = relationship("TeamMember", back_populates="org", cascade="all, delete-orphan")
     blog_posts = relationship("BlogPost", back_populates="org", cascade="all, delete-orphan")
     email_drafts = relationship("EmailDraft", back_populates="org", cascade="all, delete-orphan")
+    seo_pr_runs = relationship("SeoPrRun", back_populates="org", cascade="all, delete-orphan")
 
 
 class Signal(Base):
@@ -246,6 +247,27 @@ class BlogPost(Base):
     scraped_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     org = relationship("Organization", back_populates="blog_posts")
+
+
+class SeoPrRun(Base):
+    """SEO PR pipeline run — tracks audit-to-PR lifecycle."""
+    __tablename__ = "seo_pr_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    domain = Column(String(500), nullable=False)
+    repo_url = Column(String(1000), default="")
+    status = Column(String(50), default="pending")  # pending, auditing, analyzing, implementing, pushing, complete, failed
+    audit_id = Column(Integer, nullable=True)  # reference to audit_results
+    plan_json = Column(Text, default="{}")  # the tiered plan
+    pr_url = Column(String(1000), default="")
+    branch_name = Column(String(255), default="")
+    error = Column(Text, default="")
+    changes_made = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    org = relationship("Organization", back_populates="seo_pr_runs")
 
 
 class Setting(Base):
