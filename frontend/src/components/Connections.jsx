@@ -37,7 +37,15 @@ export default function Connections({ onLog, orgId }) {
   const [hubKey, setHubKey] = useState('')
   const [hubConnecting, setHubConnecting] = useState(false)
 
-  // Load OAuth status + data sources + HubSpot
+  // Slack state
+  const [slackUrl, setSlackUrl] = useState('')
+  const [slackChannel, setSlackChannel] = useState('')
+  const [slackNotify, setSlackNotify] = useState(false)
+  const [slackConnected, setSlackConnected] = useState(false)
+  const [slackTesting, setSlackTesting] = useState(false)
+  const [slackSaving, setSlackSaving] = useState(false)
+
+  // Load OAuth status + data sources + HubSpot + Slack
   useEffect(() => {
     if (!orgId) return
     fetch(`${API}/oauth/status`, { headers: orgHeaders(orgId) })
@@ -45,7 +53,86 @@ export default function Connections({ onLog, orgId }) {
     fetch(`${API}/hubspot/status`, { headers: orgHeaders(orgId) })
       .then(r => r.json()).then(setHubStatus).catch(() => setHubStatus({ connected: false }))
     loadDataSources()
+    loadSlackSettings()
   }, [orgId])
+
+  async function loadSlackSettings() {
+    try {
+      const res = await fetch(`${API}/settings`, { headers: orgHeaders(orgId) })
+      if (!res.ok) return
+      const data = await res.json()
+      const url = data.slack_webhook_url?.value || ''
+      setSlackUrl(url)
+      setSlackConnected(!!url)
+      setSlackChannel(data.slack_channel_name?.value || '')
+      setSlackNotify(data.slack_notify_on_generate?.value === 'true')
+    } catch { /* ignore */ }
+  }
+
+  async function saveSlack() {
+    setSlackSaving(true)
+    try {
+      await fetch(`${API}/settings`, {
+        method: 'PUT', headers: orgHeaders(orgId),
+        body: JSON.stringify({ settings: {
+          slack_webhook_url: slackUrl,
+          slack_channel_name: slackChannel,
+          slack_notify_on_generate: slackNotify ? 'true' : '',
+        }}),
+      })
+      setSlackConnected(!!slackUrl.trim())
+      onLog?.('SLACK — settings saved', 'success')
+    } catch (e) {
+      onLog?.(`SLACK SAVE FAILED — ${e.message}`, 'error')
+    } finally {
+      setSlackSaving(false)
+    }
+  }
+
+  async function testSlack() {
+    setSlackTesting(true)
+    try {
+      // Save first so the test endpoint can read the URL
+      await fetch(`${API}/settings`, {
+        method: 'PUT', headers: orgHeaders(orgId),
+        body: JSON.stringify({ settings: { slack_webhook_url: slackUrl }}),
+      })
+      const res = await fetch(`${API}/slack/test`, {
+        method: 'POST', headers: orgHeaders(orgId),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setSlackConnected(true)
+        onLog?.('SLACK — test message sent successfully', 'success')
+      } else {
+        onLog?.(`SLACK TEST FAILED — ${data.error || 'unknown error'}`, 'error')
+      }
+    } catch (e) {
+      onLog?.(`SLACK TEST FAILED — ${e.message}`, 'error')
+    } finally {
+      setSlackTesting(false)
+    }
+  }
+
+  async function disconnectSlack() {
+    try {
+      await fetch(`${API}/settings`, {
+        method: 'PUT', headers: orgHeaders(orgId),
+        body: JSON.stringify({ settings: {
+          slack_webhook_url: '',
+          slack_channel_name: '',
+          slack_notify_on_generate: '',
+        }}),
+      })
+      setSlackUrl('')
+      setSlackChannel('')
+      setSlackNotify(false)
+      setSlackConnected(false)
+      onLog?.('SLACK DISCONNECTED', 'warn')
+    } catch (e) {
+      onLog?.(`SLACK DISCONNECT FAILED — ${e.message}`, 'error')
+    }
+  }
 
   async function connectHubSpot() {
     if (!hubKey.trim()) return
@@ -276,6 +363,73 @@ export default function Connections({ onLog, orgId }) {
               )}
               {hubStatus.connected && (
                 <button className="btn btn-sm btn-danger" onClick={disconnectHubSpot}>Disconnect</button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Messaging */}
+      <div className="connections-section">
+        <h3 className="subsection-title">Messaging</h3>
+        <p className="section-desc">Send content notifications to your team's channels.</p>
+
+        <div className="connection-cards">
+          {/* Slack */}
+          <div className={`connection-card ${slackConnected ? 'connected' : ''}`}>
+            <div className="connection-card-header">
+              <span className="connection-name">Slack</span>
+              <span className={`connection-status ${slackConnected ? 'active' : 'inactive'}`}>
+                {slackConnected ? 'CONNECTED' : 'NOT CONNECTED'}
+              </span>
+            </div>
+            {slackConnected && slackChannel && (
+              <div className="connection-detail">{slackChannel}</div>
+            )}
+
+            <div style={{ marginTop: 8 }}>
+              <div className="form-row">
+                <label>Webhook URL</label>
+                <input
+                  type="password"
+                  value={slackUrl}
+                  onChange={e => setSlackUrl(e.target.value)}
+                  placeholder="https://hooks.slack.com/services/..."
+                  onKeyDown={e => { if (e.key === 'Enter') saveSlack() }}
+                />
+              </div>
+              <div className="form-row">
+                <label>Channel</label>
+                <input
+                  type="text"
+                  value={slackChannel}
+                  onChange={e => setSlackChannel(e.target.value)}
+                  placeholder="#content-review"
+                />
+              </div>
+              <div className="form-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="checkbox"
+                  id="slack-notify-toggle"
+                  checked={slackNotify}
+                  onChange={e => setSlackNotify(e.target.checked)}
+                  style={{ width: 'auto', margin: 0 }}
+                />
+                <label htmlFor="slack-notify-toggle" style={{ margin: 0, color: 'var(--text-dim)', fontSize: 12, cursor: 'pointer' }}>
+                  Auto-notify when content is generated
+                </label>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+              <button className="btn btn-sm" onClick={saveSlack} disabled={slackSaving || !slackUrl.trim()}>
+                {slackSaving ? 'Saving...' : 'Save'}
+              </button>
+              <button className="btn btn-sm" onClick={testSlack} disabled={slackTesting || !slackUrl.trim()}>
+                {slackTesting ? 'Testing...' : 'Test Webhook'}
+              </button>
+              {slackConnected && (
+                <button className="btn btn-sm btn-danger" onClick={disconnectSlack}>Disconnect</button>
               )}
             </div>
           </div>
