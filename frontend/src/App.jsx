@@ -9,6 +9,7 @@ import Audit from './components/Audit'
 import Assets from './components/Assets'
 import StoryWorkbench from './components/StoryWorkbench'
 import Team from './components/Team'
+import SeoPR from './components/SeoPR'
 
 const API = '/api'
 
@@ -407,6 +408,7 @@ export default function App() {
             <button className={`nav-tab ${view === 'team' ? 'active' : ''}`} onClick={() => setView('team')}>Team</button>
             <button className={`nav-tab ${view === 'stories' ? 'active' : ''}`} onClick={() => setView('stories')}>Stories</button>
             <button className={`nav-tab ${view === 'audit' ? 'active' : ''}`} onClick={() => setView('audit')}>Audit</button>
+            <button className={`nav-tab ${view === 'seopr' ? 'active' : ''}`} onClick={() => setView('seopr')}>SEO PR</button>
             <button className={`nav-tab ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>Account</button>
             <button className={`nav-tab ${view === 'onboard' ? 'active' : ''}`} onClick={() => setView('onboard')}>+ Company</button>
           </nav>
@@ -462,7 +464,7 @@ export default function App() {
 
         {/* MAIN CONTENT */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          {(view === 'settings' || view === 'voice' || view === 'scout' || view === 'import' || view === 'onboard' || view === 'connections' || view === 'audit' || view === 'assets' || view === 'team') && (
+          {(view === 'settings' || view === 'voice' || view === 'scout' || view === 'import' || view === 'onboard' || view === 'connections' || view === 'audit' || view === 'seopr' || view === 'assets' || view === 'team') && (
             <div className="pressroom" style={{ gridTemplateColumns: '1fr' }}>
               <div className="desk-area" style={{ gridTemplateRows: '1fr 220px' }}>
                 {view === 'settings' && <Settings onLog={log} orgId={orgId} />}
@@ -472,6 +474,7 @@ export default function App() {
                 {view === 'onboard' && <Onboard onLog={log} onComplete={onOnboardComplete} />}
                 {view === 'connections' && <Connections onLog={log} orgId={orgId} />}
                 {view === 'audit' && <Audit onLog={log} orgId={orgId} />}
+                {view === 'seopr' && <SeoPR onLog={log} orgId={orgId} />}
                 {view === 'assets' && <Assets orgId={orgId} />}
                 {view === 'team' && <Team orgId={orgId} />}
                 <div className="log-panel">

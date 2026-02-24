@@ -12,7 +12,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import (Signal, Brief, Content, Setting, Organization, DataSource, TeamMember,
-                    CompanyAsset, Story, StorySignal, ApiKey, AuditResult,
+                    CompanyAsset, Story, StorySignal, ApiKey, AuditResult, SeoPrRun,
                     SignalType, ContentChannel, ContentStatus, StoryStatus)
 from services.df_client import df
 
@@ -919,6 +919,69 @@ class DataLayer:
         return True
 
     # ──────────────────────────────────────
+    # SEO PR Runs
+    # ──────────────────────────────────────
+
+    async def save_seo_pr_run(self, data: dict) -> dict:
+        run = SeoPrRun(
+            org_id=self.org_id,
+            domain=data["domain"],
+            repo_url=data.get("repo_url", ""),
+            status=data.get("status", "pending"),
+            audit_id=data.get("audit_id"),
+            plan_json=json.dumps(data["plan"]) if isinstance(data.get("plan"), dict) else data.get("plan_json", "{}"),
+            pr_url=data.get("pr_url", ""),
+            branch_name=data.get("branch_name", ""),
+            error=data.get("error", ""),
+            changes_made=data.get("changes_made", 0),
+        )
+        self.db.add(run)
+        await self.db.flush()
+        return _serialize_seo_pr_run(run)
+
+    async def update_seo_pr_run(self, run_id: int, updates: dict) -> dict | None:
+        query = select(SeoPrRun).where(SeoPrRun.id == run_id)
+        if self.org_id:
+            query = query.where(SeoPrRun.org_id == self.org_id)
+        result = await self.db.execute(query)
+        run = result.scalar_one_or_none()
+        if not run:
+            return None
+        for field, value in updates.items():
+            if field == "plan" and isinstance(value, dict):
+                run.plan_json = json.dumps(value)
+            elif hasattr(run, field):
+                setattr(run, field, value)
+        await self.db.flush()
+        return _serialize_seo_pr_run(run)
+
+    async def list_seo_pr_runs(self, limit: int = 20) -> list[dict]:
+        query = select(SeoPrRun).order_by(SeoPrRun.created_at.desc()).limit(limit)
+        if self.org_id:
+            query = query.where(SeoPrRun.org_id == self.org_id)
+        result = await self.db.execute(query)
+        return [_serialize_seo_pr_run(r) for r in result.scalars().all()]
+
+    async def get_seo_pr_run(self, run_id: int) -> dict | None:
+        query = select(SeoPrRun).where(SeoPrRun.id == run_id)
+        if self.org_id:
+            query = query.where(SeoPrRun.org_id == self.org_id)
+        result = await self.db.execute(query)
+        r = result.scalar_one_or_none()
+        return _serialize_seo_pr_run(r) if r else None
+
+    async def delete_seo_pr_run(self, run_id: int) -> bool:
+        query = select(SeoPrRun).where(SeoPrRun.id == run_id)
+        if self.org_id:
+            query = query.where(SeoPrRun.org_id == self.org_id)
+        result = await self.db.execute(query)
+        r = result.scalar_one_or_none()
+        if not r:
+            return False
+        await self.db.delete(r)
+        return True
+
+    # ──────────────────────────────────────
     # Signal Stats / Attribution
     # ──────────────────────────────────────
 
@@ -1028,4 +1091,22 @@ def _serialize_team_member(m: TeamMember) -> dict:
         "linkedin_url": m.linkedin_url, "email": m.email,
         "expertise_tags": tags,
         "created_at": m.created_at.isoformat() if m.created_at else None,
+    }
+
+
+def _serialize_seo_pr_run(r: SeoPrRun) -> dict:
+    plan = {}
+    if r.plan_json:
+        try:
+            plan = json.loads(r.plan_json)
+        except (json.JSONDecodeError, ValueError):
+            plan = {}
+    return {
+        "id": r.id, "org_id": r.org_id, "domain": r.domain,
+        "repo_url": r.repo_url, "status": r.status,
+        "audit_id": r.audit_id, "plan": plan,
+        "pr_url": r.pr_url, "branch_name": r.branch_name,
+        "error": r.error, "changes_made": r.changes_made,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
     }
