@@ -22,6 +22,7 @@ from api.datasources import router as datasources_router
 from api.audit import router as audit_router
 from api.assets import router as assets_router
 from api.stories import router as stories_router
+from api.team import router as team_router
 
 
 @asynccontextmanager
@@ -72,6 +73,7 @@ app.include_router(datasources_router)
 app.include_router(audit_router)
 app.include_router(assets_router)
 app.include_router(stories_router)
+app.include_router(team_router)
 
 # Serve frontend static files if built — MUST be last (catch-all)
 frontend_dist = Path(__file__).parent / "frontend" / "dist"
