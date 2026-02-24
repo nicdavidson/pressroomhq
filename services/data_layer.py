@@ -232,6 +232,7 @@ class DataLayer:
                 "body": data["body"],
                 "body_raw": data.get("body_raw", ""),
                 "author": data.get("author", "company"),
+                "source_signal_ids": data.get("source_signal_ids", ""),
                 "created_at": datetime.datetime.utcnow().isoformat(),
             }
             if self.org_id:
@@ -250,6 +251,7 @@ class DataLayer:
             body=data["body"],
             body_raw=data.get("body_raw", ""),
             author=data.get("author", "company"),
+            source_signal_ids=data.get("source_signal_ids", ""),
         )
         self.db.add(content)
         await self.db.flush()
@@ -916,6 +918,57 @@ class DataLayer:
         await self.db.delete(m)
         return True
 
+    # ──────────────────────────────────────
+    # Signal Stats / Attribution
+    # ──────────────────────────────────────
+
+    async def increment_signal_usage(self, signal_id: int) -> None:
+        """Bump times_used by 1 on a signal."""
+        query = select(Signal).where(Signal.id == signal_id)
+        if self.org_id:
+            query = query.where(Signal.org_id == self.org_id)
+        result = await self.db.execute(query)
+        s = result.scalar_one_or_none()
+        if s:
+            s.times_used = (s.times_used or 0) + 1
+            await self.db.flush()
+
+    async def increment_signal_spikes(self, signal_id: int) -> None:
+        """Bump times_spiked by 1 on a signal."""
+        query = select(Signal).where(Signal.id == signal_id)
+        if self.org_id:
+            query = query.where(Signal.org_id == self.org_id)
+        result = await self.db.execute(query)
+        s = result.scalar_one_or_none()
+        if s:
+            s.times_spiked = (s.times_spiked or 0) + 1
+            await self.db.flush()
+
+    async def get_signal_stats(self) -> list[dict]:
+        """Return signals with usage/spike counts, ordered by times_used desc."""
+        query = select(Signal).order_by(Signal.times_used.desc(), Signal.created_at.desc())
+        if self.org_id:
+            query = query.where(Signal.org_id == self.org_id)
+        result = await self.db.execute(query)
+        return [
+            {"id": s.id, "type": s.type.value, "source": s.source, "title": s.title,
+             "times_used": s.times_used or 0, "times_spiked": s.times_spiked or 0}
+            for s in result.scalars().all()
+        ]
+
+    async def get_signals_by_ids(self, signal_ids: list[int]) -> list[dict]:
+        """Fetch minimal signal info for a list of IDs — used for source attribution display."""
+        if not signal_ids:
+            return []
+        query = select(Signal).where(Signal.id.in_(signal_ids))
+        if self.org_id:
+            query = query.where(Signal.org_id == self.org_id)
+        result = await self.db.execute(query)
+        return [
+            {"id": s.id, "type": s.type.value, "title": s.title, "source": s.source}
+            for s in result.scalars().all()
+        ]
+
     async def commit(self):
         await self.db.commit()
 
@@ -930,6 +983,7 @@ def _serialize_content(c: Content) -> dict:
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "approved_at": c.approved_at.isoformat() if c.approved_at else None,
         "published_at": c.published_at.isoformat() if c.published_at else None,
+        "source_signal_ids": getattr(c, "source_signal_ids", "") or "",
     }
 
 

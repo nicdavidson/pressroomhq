@@ -490,6 +490,7 @@ async def generate_content(brief: dict, signals: list[dict], channel: ContentCha
         "channel": channel,
         "headline": f"{channel_config['headline_prefix']}  {headline[:200]}",
         "body": body,
+        "source_signal_ids": ",".join(str(s.get("id", "")) for s in ranked_signals if s.get("id")),
     }
 
 
@@ -661,6 +662,7 @@ async def generate_from_story(story: dict, dl, channels: list[str] | None = None
             "body": clean_body,
             "body_raw": raw_body,
             "author": "company",
+            "source_signal_ids": item.get("source_signal_ids", ""),
         })
         saved.append(result)
 

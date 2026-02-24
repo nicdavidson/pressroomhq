@@ -131,8 +131,14 @@ async def trigger_generate(
             "body": clean_body,
             "body_raw": raw_body,
             "author": "company",
+            "source_signal_ids": item.get("source_signal_ids", ""),
         })
         saved_content.append(result)
+        # Increment usage count on each source signal
+        for sid in (item.get("source_signal_ids", "") or "").split(","):
+            sid = sid.strip()
+            if sid and sid.isdigit():
+                await dl.increment_signal_usage(int(sid))
 
     await dl.commit()
     return {
@@ -252,8 +258,14 @@ async def full_run(since_hours: int = 24, dl: DataLayer = Depends(get_data_layer
             "body": clean_body,
             "body_raw": raw_body,
             "author": "company",
+            "source_signal_ids": item.get("source_signal_ids", ""),
         })
         saved_content.append(result)
+        # Increment usage count on each source signal
+        for sid in (item.get("source_signal_ids", "") or "").split(","):
+            sid = sid.strip()
+            if sid and sid.isdigit():
+                await dl.increment_signal_usage(int(sid))
 
     await dl.commit()
 

@@ -52,16 +52,19 @@ export default function Scout({ onLog, orgId }) {
   const [signals, setSignals] = useState([])
   const [scouting, setScouting] = useState(false)
   const [collapsed, setCollapsed] = useState({})
+  const [signalStats, setSignalStats] = useState([])
 
   const load = useCallback(async () => {
     if (!orgId) return
     try {
-      const [setRes, sigRes] = await Promise.all([
+      const [setRes, sigRes, statsRes] = await Promise.all([
         fetch(`${API}/settings`, { headers: orgHeaders(orgId) }),
         fetch(`${API}/signals?limit=50`, { headers: orgHeaders(orgId) }),
+        fetch(`${API}/signals/stats/performance`, { headers: orgHeaders(orgId) }),
       ])
       if (setRes.ok) setSettings(await setRes.json())
       if (sigRes.ok) setSignals(await sigRes.json())
+      if (statsRes.ok) setSignalStats(await statsRes.json())
     } catch (e) {
       onLog?.('Failed to load scout data', 'error')
     }
@@ -243,6 +246,50 @@ export default function Scout({ onLog, orgId }) {
           </div>
         ))}
       </div>
+
+      {/* SIGNAL PERFORMANCE */}
+      {signalStats.some(s => s.times_used > 0) && (
+        <div className="settings-section">
+          <div className="section-label">
+            Signal Performance <span className="section-count">wire dashboard</span>
+          </div>
+
+          <table className="perf-table">
+            <thead>
+              <tr>
+                <th>TYPE</th>
+                <th>SIGNAL</th>
+                <th>USED</th>
+                <th>SPIKED</th>
+                <th>RATE</th>
+              </tr>
+            </thead>
+            <tbody>
+              {signalStats.filter(s => s.times_used > 0).slice(0, 20).map(s => {
+                const spikeRate = s.times_used > 0 ? (s.times_spiked / s.times_used) : 0
+                const isHot = spikeRate > 0.5 && s.times_used >= 2
+                return (
+                  <tr key={s.id} className={isHot ? 'perf-row-hot' : ''}>
+                    <td className="perf-type">{SIGNAL_TAG_MAP[s.type] || s.type}</td>
+                    <td className="perf-title">{s.title?.slice(0, 50)}{s.title?.length > 50 ? '...' : ''}</td>
+                    <td className="perf-num">{s.times_used}</td>
+                    <td className="perf-num perf-spike">{s.times_spiked}</td>
+                    <td className={`perf-num ${isHot ? 'perf-rate-bad' : 'perf-rate-ok'}`}>
+                      {(spikeRate * 100).toFixed(0)}%
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+
+          {signalStats.filter(s => s.times_used >= 2 && (s.times_spiked / s.times_used) > 0.5).length > 0 && (
+            <div className="perf-warning">
+              ADVISORY — signals marked in red have high spike rates. Consider removing from sources.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

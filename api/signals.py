@@ -16,6 +16,12 @@ async def list_signals(limit: int = 50, dl: DataLayer = Depends(get_data_layer))
     return await dl.list_signals(limit=limit)
 
 
+@router.get("/stats/performance")
+async def signal_stats(dl: DataLayer = Depends(get_data_layer)):
+    """Signal performance — usage and spike counts for the feedback loop."""
+    return await dl.get_signal_stats()
+
+
 @router.get("/{signal_id}")
 async def get_signal(signal_id: int, dl: DataLayer = Depends(get_data_layer)):
     signal = await dl.get_signal(signal_id)
@@ -67,3 +73,4 @@ async def delete_signal(signal_id: int, dl: DataLayer = Depends(get_data_layer))
     if not deleted:
         return {"error": "Signal not found"}
     return {"deleted": signal_id}
+
