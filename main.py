@@ -25,6 +25,7 @@ from api.stories import router as stories_router
 from api.team import router as team_router
 from api.blog import router as blog_router
 from api.email import router as email_router
+from api.hubspot import router as hubspot_router
 
 
 @asynccontextmanager
@@ -78,6 +79,7 @@ app.include_router(stories_router)
 app.include_router(team_router)
 app.include_router(blog_router)
 app.include_router(email_router)
+app.include_router(hubspot_router)
 
 # Serve frontend static files if built — MUST be last (catch-all)
 frontend_dist = Path(__file__).parent / "frontend" / "dist"
