@@ -44,7 +44,7 @@ export default function Company({ orgId, onLog }) {
   const [industry, setIndustry] = useState('')
   const [topics, setTopics] = useState([])
   const [competitors, setCompetitors] = useState([])
-  const [socials, setSocials] = useState({ linkedin: '', x: '', github: '', facebook: '', instagram: '', youtube: '' })
+  const [socials, setSocials] = useState({ linkedin: '', x: '', github: '', blog: '', facebook: '', instagram: '', youtube: '' })
   const [ghOrgs, setGhOrgs] = useState([])
   const [saving, setSaving] = useState(null) // which section is saving
   const [syncing, setSyncing] = useState(false)
@@ -80,6 +80,7 @@ export default function Company({ orgId, onLog }) {
           linkedin: sp.linkedin || '',
           x: sp.x || sp.twitter || '',
           github: sp.github || '',
+          blog: sp.blog || '',
           facebook: sp.facebook || '',
           instagram: sp.instagram || '',
           youtube: sp.youtube || '',
@@ -266,6 +267,7 @@ export default function Company({ orgId, onLog }) {
             { key: 'linkedin', label: 'LinkedIn', ph: 'https://linkedin.com/company/...' },
             { key: 'x', label: 'Twitter / X', ph: 'https://x.com/...' },
             { key: 'github', label: 'GitHub', ph: 'https://github.com/...' },
+            { key: 'blog', label: 'Blog / News', ph: 'https://blog.acme.com' },
             { key: 'facebook', label: 'Facebook', ph: 'https://facebook.com/...' },
             { key: 'instagram', label: 'Instagram', ph: 'https://instagram.com/...' },
             { key: 'youtube', label: 'YouTube', ph: 'https://youtube.com/@...' },

@@ -1,5 +1,6 @@
 """Blog API — scrape, list, and manage scraped blog posts."""
 
+import json
 import logging
 
 from fastapi import APIRouter, Depends
@@ -26,22 +27,23 @@ async def scrape_blog(req: ScrapeRequest, dl: DataLayer = Depends(get_data_layer
     """
     blog_url = req.blog_url.strip()
 
-    # Auto-detect from assets if no URL provided
+    # Primary: read from social_profiles.blog in Company settings
+    if not blog_url:
+        try:
+            sp_raw = await dl.get_setting("social_profiles")
+            sp = json.loads(sp_raw) if sp_raw else {}
+            blog_url = (sp.get("blog") or "").strip()
+        except Exception:
+            pass
+
+    # Fallback: check assets for blog-type entries
     if not blog_url:
         assets = await dl.list_assets(asset_type="blog")
         if assets:
             blog_url = assets[0]["url"]
 
-    # Fallback: check subdomain assets with blog-like labels (legacy data)
     if not blog_url:
-        sub_assets = await dl.list_assets(asset_type="subdomain")
-        for a in sub_assets:
-            if a.get("label", "").lower() in ("blog", "news", "articles"):
-                blog_url = a["url"]
-                break
-
-    if not blog_url:
-        return {"error": "No blog URL provided and no blog asset found for this org."}
+        return {"error": "No blog URL configured. Set it in Config → Company → Social Profiles."}
 
     api_key = await dl.resolve_api_key()
     posts = await scrape_blog_posts(blog_url, days=30, api_key=api_key)

@@ -11,6 +11,17 @@ export default function Blog({ orgId }) {
 
   const headers = { 'Content-Type': 'application/json', ...(orgId ? { 'X-Org-Id': String(orgId) } : {}) }
 
+  // Load blog URL from social_profiles setting
+  const loadBlogUrl = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/settings`, { headers })
+      if (!res.ok) return
+      const data = await res.json()
+      const sp = JSON.parse(data.social_profiles?.value || '{}')
+      if (sp.blog) setBlogUrl(sp.blog)
+    } catch { /* ignore */ }
+  }, [orgId])
+
   const fetchPosts = useCallback(async () => {
     try {
       const res = await fetch(`${API}/blog/posts`, { headers })
@@ -20,7 +31,7 @@ export default function Blog({ orgId }) {
     setLoading(false)
   }, [orgId])
 
-  useEffect(() => { fetchPosts() }, [fetchPosts])
+  useEffect(() => { loadBlogUrl(); fetchPosts() }, [loadBlogUrl, fetchPosts])
 
   const scrapeBlog = async () => {
     setScraping(true)
@@ -65,7 +76,7 @@ export default function Blog({ orgId }) {
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <input
             className="setting-input"
-            placeholder="Blog URL (or auto-detect)"
+            placeholder="Blog URL (from Company settings)"
             value={blogUrl}
             onChange={e => setBlogUrl(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && scrapeBlog()}
@@ -113,7 +124,7 @@ export default function Blog({ orgId }) {
         <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-dim)' }}>
           <p style={{ fontSize: 14, marginBottom: 8 }}>No blog posts scraped yet.</p>
           <p style={{ fontSize: 12 }}>
-            Enter a blog URL and click <strong>Scrape Blog</strong>, or leave the URL empty to auto-detect from your assets.
+            Set your blog URL in <strong>Config &rarr; Company &rarr; Social Profiles</strong>, then click <strong>Scrape Blog</strong>.
           </p>
         </div>
       ) : (
