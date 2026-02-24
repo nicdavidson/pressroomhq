@@ -21,18 +21,20 @@ log = logging.getLogger("pressroom")
 # GitHub Org/User Repo Discovery
 # ──────────────────────────────────────
 
-async def discover_github_repos(github_url: str, gh_token: str = "", max_repos: int = 20) -> list[str]:
+async def discover_github_repos(github_url: str, gh_token: str = "", max_repos: int = 200) -> list[str]:
     """Discover all active repos under a GitHub org or user.
 
-    Takes a GitHub profile URL like 'https://github.com/dreamfactorysoftware'
-    and returns a list of 'owner/repo' strings, sorted by most recently pushed.
+    Takes a GitHub org/user name (e.g. 'teamtreehouse') or URL
+    (e.g. 'https://github.com/dreamfactorysoftware') and returns
+    a list of 'owner/repo' strings, sorted by most recently pushed.
+    Paginates to get all repos.
     """
     import re
-    # Extract org/user name from URL
+    # Accept bare org name or full URL
     match = re.search(r'github\.com/([^/\s?#]+)', github_url)
-    if not match:
+    owner = match.group(1) if match else github_url.strip().strip('/')
+    if not owner:
         return []
-    owner = match.group(1)
 
     token = gh_token or settings.github_token
     headers = {"Authorization": f"token {token}"} if token else {}
@@ -43,17 +45,26 @@ async def discover_github_repos(github_url: str, gh_token: str = "", max_repos: 
         # Try as org first, fall back to user
         for endpoint in [f"orgs/{owner}/repos", f"users/{owner}/repos"]:
             try:
-                resp = await client.get(
-                    f"https://api.github.com/{endpoint}",
-                    headers=headers,
-                    params={"per_page": 100, "sort": "pushed", "direction": "desc"},
-                )
-                if resp.status_code == 200:
+                page = 1
+                while True:
+                    resp = await client.get(
+                        f"https://api.github.com/{endpoint}",
+                        headers=headers,
+                        params={"per_page": 100, "sort": "pushed", "direction": "desc", "page": page},
+                    )
+                    if resp.status_code != 200:
+                        break
                     data = resp.json()
+                    if not data:
+                        break
                     for r in data:
                         if r.get("archived") or r.get("disabled"):
                             continue
                         repos.append(r["full_name"])
+                    if len(data) < 100 or len(repos) >= max_repos:
+                        break
+                    page += 1
+                if repos:
                     break  # got results, don't try the other endpoint
             except Exception:
                 continue
@@ -401,13 +412,27 @@ async def run_full_scout(since_hours: int = 24, org_settings: dict | None = None
     # Parse org settings or fall back to global config
     if org_settings:
         repos = _parse_json_list(org_settings.get("scout_github_repos", ""), settings.scout_github_repos)
+        gh_orgs = _parse_json_list(org_settings.get("scout_github_orgs", ""), [])
         hn_kw = _parse_json_list(org_settings.get("scout_hn_keywords", ""), settings.scout_hn_keywords)
         subs = _parse_json_list(org_settings.get("scout_subreddits", ""), settings.scout_subreddits)
         rss = _parse_json_list(org_settings.get("scout_rss_feeds", ""), settings.scout_rss_feeds)
         web_queries = _parse_json_list(org_settings.get("scout_web_queries", ""), [])
         gh_token = org_settings.get("github_token", "") or settings.github_token
 
-        # Auto-discover GitHub repos if we have a GitHub URL but few/no repos
+        # Expand GitHub orgs into repos
+        existing = set(r.lower() for r in repos)
+        for org_name in gh_orgs:
+            try:
+                discovered = await discover_github_repos(org_name, gh_token=gh_token)
+                for r in discovered:
+                    if r.lower() not in existing:
+                        repos.append(r)
+                        existing.add(r.lower())
+                log.info("SCOUT — org %s → %d repos discovered", org_name, len(discovered))
+            except Exception:
+                log.warning("SCOUT — failed to discover repos for org: %s", org_name)
+
+        # Also auto-discover from social profile GitHub URL if few repos
         if len(repos) < 3:
             social_raw = org_settings.get("social_profiles", "")
             if social_raw:
@@ -416,15 +441,12 @@ async def run_full_scout(since_hours: int = 24, org_settings: dict | None = None
                     github_url = socials.get("github", "")
                     if github_url:
                         discovered = await discover_github_repos(github_url, gh_token=gh_token)
-                        if discovered:
-                            # Merge: keep existing + add discovered, deduplicate
-                            existing = set(r.lower() for r in repos)
-                            for r in discovered:
-                                if r.lower() not in existing:
-                                    repos.append(r)
-                                    existing.add(r.lower())
-                            log.info("SCOUT — auto-discovered %d GitHub repos (total: %d)",
-                                     len(discovered), len(repos))
+                        for r in discovered:
+                            if r.lower() not in existing:
+                                repos.append(r)
+                                existing.add(r.lower())
+                        log.info("SCOUT — social profile → %d repos discovered (total: %d)",
+                                 len(discovered), len(repos))
                 except Exception:
                     pass
     else:

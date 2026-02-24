@@ -23,6 +23,7 @@ DEFAULTS = {
     "df_base_url": "http://localhost:8080",
     "df_api_key": "",
     # Scout sources
+    "scout_github_orgs": '[]',
     "scout_github_repos": '["dreamfactorysoftware/dreamfactory"]',
     "scout_hn_keywords": '["DreamFactory", "REST API", "API gateway"]',
     "scout_subreddits": '["selfhosted", "webdev"]',
