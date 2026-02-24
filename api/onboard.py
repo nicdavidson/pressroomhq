@@ -179,6 +179,9 @@ async def onboard_apply(req: ApplyProfileRequest, dl: DataLayer = Depends(get_da
             if scout_sources.get("rss_feeds"):
                 await dl.set_setting("scout_rss_feeds", json.dumps(scout_sources["rss_feeds"]))
                 applied.append("scout_rss_feeds")
+            if scout_sources.get("web_queries"):
+                await dl.set_setting("scout_web_queries", json.dumps(scout_sources["web_queries"]))
+                applied.append("scout_web_queries")
     except Exception:
         pass  # Non-fatal — scout sources are nice to have
 
@@ -215,8 +218,13 @@ async def onboard_apply(req: ApplyProfileRequest, dl: DataLayer = Depends(get_da
             continue
         # Map crawl labels to asset types
         if label.startswith("sub:"):
-            asset_type = "subdomain"
-            asset_label = label.removeprefix("sub:")
+            sub_name = label.removeprefix("sub:")
+            # Blog subdomains (blog.example.com) should be typed as "blog" not "subdomain"
+            if sub_name in ("blog", "news", "articles"):
+                asset_type = "blog"
+            else:
+                asset_type = "subdomain"
+            asset_label = sub_name
         elif label in ("blog", "news", "articles"):
             asset_type = "blog"
             asset_label = label
@@ -275,10 +283,11 @@ async def onboard_apply(req: ApplyProfileRequest, dl: DataLayer = Depends(get_da
 
     # Auto-scrape blog if a blog asset was discovered
     blog_scrape_count = 0
+    blog_labels = ("blog", "news", "articles", "sub:blog", "sub:news", "sub:articles")
     blog_assets = [
         {"url": page_data.get("url", "") if isinstance(page_data, dict) else str(page_data)}
         for label, page_data in crawl_pages.items()
-        if label in ("blog", "news", "articles")
+        if label in blog_labels
     ]
     if blog_assets:
         try:

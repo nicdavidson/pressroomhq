@@ -37,11 +37,18 @@ const SOURCE_TYPES = [
     signalTypes: ['rss'],
     signalLabel: 'RSS',
   },
+  {
+    key: 'scout_web_queries',
+    label: 'Web Search',
+    placeholder: 'trend or topic to search',
+    signalTypes: ['web_search'],
+    signalLabel: 'WEB',
+  },
 ]
 
 const SIGNAL_TAG_MAP = {
   github_release: 'RELEASE', github_commit: 'COMMITS', hackernews: 'HN',
-  reddit: 'REDDIT', rss: 'RSS', trend: 'TREND',
+  reddit: 'REDDIT', rss: 'RSS', trend: 'TREND', web_search: 'WEB',
   support: 'SUPPORT', performance: 'PERF',
 }
 
@@ -53,6 +60,13 @@ export default function Scout({ onLog, orgId }) {
   const [scouting, setScouting] = useState(false)
   const [collapsed, setCollapsed] = useState({})
   const [signalStats, setSignalStats] = useState([])
+  // Suggestions
+  const [suggesting, setSuggesting] = useState(false)
+  const [suggestions, setSuggestions] = useState(null) // { scout_subreddits: [...], ... }
+  // Visibility check
+  const [visDomain, setVisDomain] = useState('')
+  const [visRunning, setVisRunning] = useState(false)
+  const [visResult, setVisResult] = useState(null)
 
   const load = useCallback(async () => {
     if (!orgId) return
@@ -143,6 +157,60 @@ export default function Scout({ onLog, orgId }) {
     }
   }
 
+  // Suggest sources
+  const suggestSources = async () => {
+    if (suggesting) return
+    setSuggesting(true)
+    setSuggestions(null)
+    onLog?.('SUGGEST — asking Claude for source recommendations...', 'action')
+    try {
+      const res = await fetch(`${API}/pipeline/suggest-sources`, {
+        method: 'POST',
+        headers: orgHeaders(orgId),
+      })
+      const data = await res.json()
+      if (data.error) {
+        onLog?.(`SUGGEST FAILED — ${data.error}`, 'error')
+        return
+      }
+      // Count total suggestions
+      const total = Object.values(data).reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0)
+      setSuggestions(data)
+      onLog?.(`SUGGEST COMPLETE — ${total} source recommendations`, 'success')
+    } catch (e) {
+      onLog?.(`SUGGEST ERROR — ${e.message}`, 'error')
+    } finally {
+      setSuggesting(false)
+    }
+  }
+
+  const acceptSuggestion = (settingsKey, value) => {
+    const tags = getTags(settingsKey)
+    if (!tags.includes(value)) {
+      addTag(settingsKey, tags, value)
+    }
+    // Remove from suggestions
+    setSuggestions(prev => {
+      if (!prev) return prev
+      const updated = { ...prev }
+      if (Array.isArray(updated[settingsKey])) {
+        updated[settingsKey] = updated[settingsKey].filter(v => v !== value)
+      }
+      return updated
+    })
+  }
+
+  const dismissSuggestion = (settingsKey, value) => {
+    setSuggestions(prev => {
+      if (!prev) return prev
+      const updated = { ...prev }
+      if (Array.isArray(updated[settingsKey])) {
+        updated[settingsKey] = updated[settingsKey].filter(v => v !== value)
+      }
+      return updated
+    })
+  }
+
   // Group signals by source type
   const groupedSignals = useMemo(() => {
     const knownTypes = SOURCE_TYPES.flatMap(st => st.signalTypes)
@@ -162,11 +230,45 @@ export default function Scout({ onLog, orgId }) {
 
   const toggleGroup = (key) => setCollapsed(prev => ({ ...prev, [key]: !prev[key] }))
 
+  // Visibility check
+  const runVisibility = async () => {
+    if (visRunning || !visDomain.trim()) return
+    setVisRunning(true)
+    setVisResult(null)
+    onLog?.('VISIBILITY CHECK — searching for your domain...', 'action')
+    try {
+      const res = await fetch(`${API}/pipeline/visibility`, {
+        method: 'POST',
+        headers: orgHeaders(orgId),
+        body: JSON.stringify({ domain: visDomain.trim() }),
+      })
+      const data = await res.json()
+      if (data.error) {
+        onLog?.(`VISIBILITY FAILED — ${data.error}`, 'error')
+        return
+      }
+      setVisResult(data)
+      onLog?.(`VISIBILITY — score: ${data.score}% (${data.queries_found}/${data.queries_checked} queries found your domain)`, 'success')
+    } catch (e) {
+      onLog?.(`VISIBILITY ERROR — ${e.message}`, 'error')
+    } finally {
+      setVisRunning(false)
+    }
+  }
+
   return (
     <div className="settings-page">
       <div className="settings-header">
         <h2 className="settings-title">Scout</h2>
         <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            className={`btn ${suggesting ? 'loading' : ''}`}
+            onClick={suggestSources}
+            disabled={suggesting}
+            style={{ borderColor: 'var(--amber-dim)', color: 'var(--amber)' }}
+          >
+            {suggesting ? 'Thinking...' : 'Suggest Sources'}
+          </button>
           <button
             className={`btn btn-run ${scouting ? 'loading' : ''}`}
             onClick={runScout}
@@ -187,6 +289,7 @@ export default function Scout({ onLog, orgId }) {
       {/* SCOUT SOURCES */}
       {SOURCE_TYPES.map(st => {
         const tags = getTags(st.key)
+        const suggs = suggestions && Array.isArray(suggestions[st.key]) ? suggestions[st.key] : []
         return (
           <div key={st.key} className="settings-section">
             <div className="section-label">{st.label} <span className="section-count">{tags.length}</span></div>
@@ -198,6 +301,33 @@ export default function Scout({ onLog, orgId }) {
               ))}
               <TagInput onAdd={(v) => addTag(st.key, tags, v)} placeholder={`add ${st.placeholder}...`} />
             </div>
+            {suggs.length > 0 && (
+              <div style={{ marginTop: 6 }}>
+                <span style={{ fontSize: 10, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: 1, marginRight: 8 }}>suggested</span>
+                {suggs.map((s, i) => (
+                  <span
+                    key={i}
+                    className="tag"
+                    style={{
+                      borderColor: 'var(--amber-dim)',
+                      color: 'var(--amber)',
+                      borderStyle: 'dashed',
+                      cursor: 'pointer',
+                      marginRight: 4,
+                      marginBottom: 4,
+                    }}
+                    onClick={() => acceptSuggestion(st.key, s)}
+                  >
+                    + {s}
+                    <span
+                      className="tag-x"
+                      style={{ marginLeft: 6 }}
+                      onClick={(e) => { e.stopPropagation(); dismissSuggestion(st.key, s) }}
+                    >&times;</span>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )
       })}
@@ -290,6 +420,84 @@ export default function Scout({ onLog, orgId }) {
           )}
         </div>
       )}
+
+      {/* CONTENT VISIBILITY CHECK */}
+      <div className="settings-section">
+        <div className="section-label">
+          Content Visibility <span className="section-count">how well does your content show up?</span>
+        </div>
+        <p style={{ color: 'var(--text-dim)', fontSize: 13, margin: '0 0 12px' }}>
+          Searches your configured topics via Claude and checks if your domain appears in results.
+        </p>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+          <input
+            className="input"
+            value={visDomain}
+            onChange={e => setVisDomain(e.target.value)}
+            placeholder="yourdomain.com"
+            style={{ flex: 1 }}
+          />
+          <button
+            className={`btn btn-run ${visRunning ? 'loading' : ''}`}
+            onClick={runVisibility}
+            disabled={visRunning || !visDomain.trim()}
+          >
+            {visRunning ? 'Checking...' : 'Check Visibility'}
+          </button>
+        </div>
+
+        {visRunning && (
+          <div className="scout-empty">
+            <div className="loader-bar" />
+            <p style={{ marginTop: 12 }}>Searching the web for your domain...</p>
+          </div>
+        )}
+
+        {visResult && (
+          <div>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 16,
+              padding: '12px 16px', borderRadius: 8,
+              background: visResult.score >= 50 ? 'rgba(34,197,94,0.1)' : visResult.score >= 20 ? 'rgba(234,179,8,0.1)' : 'rgba(239,68,68,0.1)',
+              border: `1px solid ${visResult.score >= 50 ? 'rgba(34,197,94,0.3)' : visResult.score >= 20 ? 'rgba(234,179,8,0.3)' : 'rgba(239,68,68,0.3)'}`,
+              marginBottom: 12,
+            }}>
+              <div style={{ fontSize: 32, fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
+                {visResult.score}%
+              </div>
+              <div>
+                <div style={{ fontWeight: 600 }}>
+                  {visResult.score >= 50 ? 'Strong visibility' : visResult.score >= 20 ? 'Moderate visibility' : 'Low visibility'}
+                </div>
+                <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>
+                  Found in {visResult.queries_found} of {visResult.queries_checked} searches for {visResult.domain}
+                </div>
+              </div>
+            </div>
+
+            <table className="perf-table">
+              <thead>
+                <tr>
+                  <th>QUERY</th>
+                  <th>FOUND</th>
+                  <th>POSITION</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visResult.results?.map((r, i) => (
+                  <tr key={i} className={r.found ? '' : 'perf-row-hot'}>
+                    <td>{r.query}</td>
+                    <td style={{ color: r.found ? 'var(--green)' : 'var(--red)' }}>
+                      {r.found ? 'YES' : 'NO'}
+                    </td>
+                    <td className="perf-num">{r.position || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

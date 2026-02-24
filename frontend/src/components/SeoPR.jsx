@@ -15,7 +15,7 @@ function formatDate(iso) {
     d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
-const STATUS_STEPS = ['pending', 'auditing', 'analyzing', 'implementing', 'pushing', 'complete']
+const STATUS_STEPS = ['pending', 'auditing', 'analyzing', 'implementing', 'pushing', 'verifying', 'complete']
 
 function StatusBadge({ status }) {
   const colors = {
@@ -24,6 +24,8 @@ function StatusBadge({ status }) {
     analyzing: 'var(--amber)',
     implementing: 'var(--amber)',
     pushing: 'var(--amber)',
+    verifying: 'var(--amber)',
+    healing: 'var(--red)',
     complete: 'var(--green)',
     failed: 'var(--red)',
   }
@@ -46,8 +48,12 @@ function StatusBadge({ status }) {
 
 function StatusProgress({ status }) {
   if (status === 'failed') return null
-  const idx = STATUS_STEPS.indexOf(status)
+  // healing maps to the verifying step visually
+  const effectiveStatus = status === 'healing' ? 'verifying' : status
+  const idx = STATUS_STEPS.indexOf(effectiveStatus)
   if (idx === -1) return null
+
+  const isHealing = status === 'healing'
 
   return (
     <div style={{ display: 'flex', gap: 3, alignItems: 'center', marginTop: 6 }}>
@@ -59,11 +65,11 @@ function StatusProgress({ status }) {
             height: 3,
             borderRadius: 2,
             background: i <= idx
-              ? (status === 'complete' ? 'var(--green)' : 'var(--amber)')
+              ? (status === 'complete' ? 'var(--green)' : isHealing ? 'var(--red)' : 'var(--amber)')
               : 'var(--border)',
             transition: 'background 0.3s',
           }}
-          title={step}
+          title={step === 'verifying' && isHealing ? 'healing' : step}
         />
       ))}
     </div>
@@ -226,7 +232,7 @@ function PlanViewer({ plan }) {
 // Run Card
 // ────────────────────────────────────────
 function RunCard({ run, selected, onSelect, onDelete }) {
-  const isActive = ['pending', 'auditing', 'analyzing', 'implementing', 'pushing'].includes(run.status)
+  const isActive = ['pending', 'auditing', 'analyzing', 'implementing', 'pushing', 'verifying', 'healing'].includes(run.status)
 
   return (
     <div
@@ -263,7 +269,7 @@ function RunCard({ run, selected, onSelect, onDelete }) {
 
       <StatusProgress status={run.status} />
 
-      <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11, color: 'var(--text-dim)' }}>
+      <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11, color: 'var(--text-dim)', flexWrap: 'wrap' }}>
         {run.changes_made > 0 && (
           <span>{run.changes_made} changes</span>
         )}
@@ -277,6 +283,17 @@ function RunCard({ run, selected, onSelect, onDelete }) {
           >
             View PR &rarr;
           </a>
+        )}
+        {run.deploy_status && run.deploy_status !== 'pending' && (
+          <span style={{
+            color: run.deploy_status === 'success' ? 'var(--green)'
+              : run.deploy_status === 'healed' ? 'var(--amber)'
+              : run.deploy_status === 'failed' ? 'var(--red)'
+              : 'var(--text-dim)',
+          }}>
+            deploy: {run.deploy_status}
+            {run.heal_attempts > 0 && ` (${run.heal_attempts} fix${run.heal_attempts !== 1 ? 'es' : ''})`}
+          </span>
         )}
         {run.status === 'failed' && run.error && (
           <span style={{ color: 'var(--red)' }}>{run.error.slice(0, 80)}</span>
@@ -293,10 +310,7 @@ function RunCard({ run, selected, onSelect, onDelete }) {
 // ────────────────────────────────────────
 // Main Component
 // ────────────────────────────────────────
-export default function SeoPR({ onLog, orgId }) {
-  const [repoUrl, setRepoUrl] = useState('')
-  const [domain, setDomain] = useState('')
-  const [baseBranch, setBaseBranch] = useState('main')
+export default function SeoPR({ onLog, orgId, repoUrl = '', domain = '', baseBranch = 'main' }) {
   const [launching, setLaunching] = useState(false)
   const [runs, setRuns] = useState([])
   const [selectedRun, setSelectedRun] = useState(null)
@@ -381,67 +395,23 @@ export default function SeoPR({ onLog, orgId }) {
   const selectedRunData = runs.find(r => r.id === selectedRun)
 
   return (
-    <div className="settings-page">
-      <div className="settings-header">
-        <h2 className="settings-title">SEO PR Workflow</h2>
-        <p className="voice-hint" style={{ marginTop: 4 }}>
-          Audit a site, identify SEO issues, and automatically create a GitHub PR with fixes.
-          Never merges to main — always creates a PR for human review.
-        </p>
-      </div>
-
-      {/* CONFIG SECTION */}
+    <>
+      {/* LAUNCH */}
       <div className="settings-section">
-        <div className="section-label">Pipeline Configuration</div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-          <div style={{ flex: 2, minWidth: 280 }}>
-            <label style={{ display: 'block', color: 'var(--text-dim)', fontSize: 11, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
-              Repository URL
-            </label>
-            <input
-              className="setting-input"
-              style={{ width: '100%' }}
-              value={repoUrl}
-              onChange={e => setRepoUrl(e.target.value)}
-              placeholder="https://github.com/owner/repo"
-              spellCheck={false}
-            />
-          </div>
-          <div style={{ flex: 1, minWidth: 200 }}>
-            <label style={{ display: 'block', color: 'var(--text-dim)', fontSize: 11, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
-              Domain
-            </label>
-            <input
-              className="setting-input"
-              style={{ width: '100%' }}
-              value={domain}
-              onChange={e => setDomain(e.target.value)}
-              placeholder="docs.example.com (or leave blank for org domain)"
-              spellCheck={false}
-            />
-          </div>
-          <div style={{ minWidth: 120 }}>
-            <label style={{ display: 'block', color: 'var(--text-dim)', fontSize: 11, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
-              Base Branch
-            </label>
-            <input
-              className="setting-input"
-              style={{ width: '100%' }}
-              value={baseBranch}
-              onChange={e => setBaseBranch(e.target.value)}
-              placeholder="main"
-              spellCheck={false}
-            />
-          </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <button
+            className={`btn btn-run ${launching ? 'loading' : ''}`}
+            onClick={launchPipeline}
+            disabled={launching || !repoUrl.trim()}
+          >
+            {launching ? 'Launching...' : 'Run SEO Pipeline'}
+          </button>
+          <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
+            {repoUrl
+              ? `${repoUrl.replace(/^https?:\/\/github\.com\//, '')} → ${domain ? domain.replace(/^https?:\/\//, '') : 'org domain'} (${baseBranch})`
+              : 'add a repo above'}
+          </span>
         </div>
-        <button
-          className={`btn btn-run ${launching ? 'loading' : ''}`}
-          style={{ fontSize: 14, padding: '10px 28px', marginTop: 4 }}
-          onClick={launchPipeline}
-          disabled={launching || !repoUrl.trim()}
-        >
-          {launching ? 'Launching...' : 'Run SEO Pipeline'}
-        </button>
       </div>
 
       {/* ACTIVE RUNS */}
@@ -528,11 +498,49 @@ export default function SeoPR({ onLog, orgId }) {
               {selectedRunData.error}
             </div>
           )}
+
+          {selectedRunData.deploy_status && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 12,
+              padding: '8px 12px',
+              borderRadius: 4,
+              fontSize: 12,
+              marginBottom: 8,
+              background: selectedRunData.deploy_status === 'success' ? 'rgba(34,197,94,0.1)'
+                : selectedRunData.deploy_status === 'healed' ? 'rgba(234,179,8,0.1)'
+                : selectedRunData.deploy_status === 'failed' ? 'rgba(239,68,68,0.1)'
+                : 'var(--bg-panel)',
+              border: `1px solid ${selectedRunData.deploy_status === 'success' ? 'rgba(34,197,94,0.3)'
+                : selectedRunData.deploy_status === 'healed' ? 'rgba(234,179,8,0.3)'
+                : selectedRunData.deploy_status === 'failed' ? 'rgba(239,68,68,0.3)'
+                : 'var(--border)'}`,
+            }}>
+              <span style={{ fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, fontSize: 10 }}>
+                DEPLOY
+              </span>
+              <span style={{
+                color: selectedRunData.deploy_status === 'success' ? 'var(--green)'
+                  : selectedRunData.deploy_status === 'healed' ? 'var(--amber)'
+                  : selectedRunData.deploy_status === 'failed' ? 'var(--red)'
+                  : 'var(--text-dim)',
+                fontWeight: 600,
+              }}>
+                {selectedRunData.deploy_status === 'healed'
+                  ? `HEALED (${selectedRunData.heal_attempts} attempt${selectedRunData.heal_attempts !== 1 ? 's' : ''})`
+                  : selectedRunData.deploy_status.toUpperCase()}
+              </span>
+              {selectedRunData.deploy_log && selectedRunData.deploy_status === 'failed' && (
+                <span style={{ color: 'var(--text-dim)', fontSize: 11, marginLeft: 'auto' }}>
+                  {selectedRunData.deploy_log.slice(0, 120)}...
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
 
       {/* PLAN VIEWER */}
       {selectedPlan && <PlanViewer plan={selectedPlan} />}
-    </div>
+    </>
   )
 }

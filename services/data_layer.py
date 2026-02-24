@@ -12,7 +12,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import (Signal, Brief, Content, Setting, Organization, DataSource, TeamMember,
-                    CompanyAsset, Story, StorySignal, ApiKey, AuditResult, BlogPost, EmailDraft, SeoPrRun,
+                    CompanyAsset, Story, StorySignal, ApiKey, AuditResult, BlogPost, EmailDraft, SeoPrRun, SiteProperty,
                     SignalType, ContentChannel, ContentStatus, StoryStatus)
 from services.df_client import df
 
@@ -333,6 +333,37 @@ class DataLayer:
             )
 
         query = select(Content).where(Content.status == ContentStatus.approved, Content.published_at.is_(None))
+        if self.org_id:
+            query = query.where(Content.org_id == self.org_id)
+        result = await self.db.execute(query)
+        return [_serialize_content(c) for c in result.scalars().all()]
+
+    # ──────────────────────────────────────
+    # Scheduling
+    # ──────────────────────────────────────
+
+    async def schedule_content(self, content_id: int, scheduled_at: datetime.datetime) -> dict:
+        """Set scheduled_at on a content item. Also approves it if not already approved."""
+        query = select(Content).where(Content.id == content_id)
+        if self.org_id:
+            query = query.where(Content.org_id == self.org_id)
+        result = await self.db.execute(query)
+        c = result.scalar_one_or_none()
+        if not c:
+            return {}
+        c.scheduled_at = scheduled_at
+        if c.status not in (ContentStatus.approved, ContentStatus.published):
+            c.status = ContentStatus.approved
+            c.approved_at = datetime.datetime.utcnow()
+        await self.db.flush()
+        return _serialize_content(c)
+
+    async def list_scheduled_content(self) -> list[dict]:
+        """List approved content that has a scheduled_at time and hasn't been published yet."""
+        query = (select(Content)
+                 .where(Content.status == ContentStatus.approved,
+                        Content.scheduled_at.isnot(None))
+                 .order_by(Content.scheduled_at.asc()))
         if self.org_id:
             query = query.where(Content.org_id == self.org_id)
         result = await self.db.execute(query)
@@ -982,6 +1013,62 @@ class DataLayer:
         return True
 
     # ──────────────────────────────────────
+    # Site Properties (site ↔ repo bonds)
+    # ──────────────────────────────────────
+
+    async def save_site_property(self, data: dict) -> dict:
+        prop = SiteProperty(
+            org_id=self.org_id,
+            name=data["name"],
+            domain=data["domain"],
+            repo_url=data.get("repo_url", ""),
+            base_branch=data.get("base_branch", "main"),
+        )
+        self.db.add(prop)
+        await self.db.flush()
+        return _serialize_site_property(prop)
+
+    async def list_site_properties(self) -> list[dict]:
+        query = select(SiteProperty).order_by(SiteProperty.created_at.desc())
+        if self.org_id:
+            query = query.where(SiteProperty.org_id == self.org_id)
+        result = await self.db.execute(query)
+        return [_serialize_site_property(p) for p in result.scalars().all()]
+
+    async def get_site_property(self, prop_id: int) -> dict | None:
+        query = select(SiteProperty).where(SiteProperty.id == prop_id)
+        if self.org_id:
+            query = query.where(SiteProperty.org_id == self.org_id)
+        result = await self.db.execute(query)
+        p = result.scalar_one_or_none()
+        return _serialize_site_property(p) if p else None
+
+    async def update_site_property(self, prop_id: int, **fields) -> dict | None:
+        query = select(SiteProperty).where(SiteProperty.id == prop_id)
+        if self.org_id:
+            query = query.where(SiteProperty.org_id == self.org_id)
+        result = await self.db.execute(query)
+        p = result.scalar_one_or_none()
+        if not p:
+            return None
+        for field, value in fields.items():
+            if hasattr(p, field):
+                setattr(p, field, value)
+        await self.db.flush()
+        return _serialize_site_property(p)
+
+    async def delete_site_property(self, prop_id: int) -> bool:
+        query = select(SiteProperty).where(SiteProperty.id == prop_id)
+        if self.org_id:
+            query = query.where(SiteProperty.org_id == self.org_id)
+        result = await self.db.execute(query)
+        p = result.scalar_one_or_none()
+        if not p:
+            return False
+        await self.db.delete(p)
+        return True
+
+    # ──────────────────────────────────────
     # Signal Stats / Attribution
     # ──────────────────────────────────────
 
@@ -1166,6 +1253,7 @@ def _serialize_content(c: Content) -> dict:
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "approved_at": c.approved_at.isoformat() if c.approved_at else None,
         "published_at": c.published_at.isoformat() if c.published_at else None,
+        "scheduled_at": c.scheduled_at.isoformat() if getattr(c, "scheduled_at", None) else None,
         "source_signal_ids": getattr(c, "source_signal_ids", "") or "",
     }
 
@@ -1223,6 +1311,17 @@ def _serialize_blog_post(bp: BlogPost) -> dict:
     }
 
 
+def _serialize_site_property(p: SiteProperty) -> dict:
+    return {
+        "id": p.id, "org_id": p.org_id, "name": p.name,
+        "domain": p.domain, "repo_url": p.repo_url,
+        "base_branch": p.base_branch,
+        "last_audit_score": p.last_audit_score,
+        "last_audit_id": p.last_audit_id,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
 def _serialize_seo_pr_run(r: SeoPrRun) -> dict:
     plan = {}
     if r.plan_json:
@@ -1236,6 +1335,9 @@ def _serialize_seo_pr_run(r: SeoPrRun) -> dict:
         "audit_id": r.audit_id, "plan": plan,
         "pr_url": r.pr_url, "branch_name": r.branch_name,
         "error": r.error, "changes_made": r.changes_made,
+        "deploy_status": getattr(r, "deploy_status", "") or "",
+        "deploy_log": getattr(r, "deploy_log", "") or "",
+        "heal_attempts": getattr(r, "heal_attempts", 0) or 0,
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "completed_at": r.completed_at.isoformat() if r.completed_at else None,
     }

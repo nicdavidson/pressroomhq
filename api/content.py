@@ -1,5 +1,6 @@
-"""Content endpoints — approval queue, content management."""
+"""Content endpoints — approval queue, content management, scheduling."""
 
+import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -11,6 +12,10 @@ router = APIRouter(prefix="/api/content", tags=["content"])
 
 class ActionRequest(BaseModel):
     action: str  # "approve" | "spike"
+
+
+class ScheduleRequest(BaseModel):
+    scheduled_at: str  # ISO 8601 datetime string
 
 
 @router.get("")
@@ -28,12 +33,38 @@ async def approval_queue(dl: DataLayer = Depends(get_data_layer)):
     return await dl.list_content(status="queued")
 
 
+@router.get("/scheduled")
+async def list_scheduled(dl: DataLayer = Depends(get_data_layer)):
+    """List all scheduled (approved, not yet published) content with their scheduled times."""
+    return await dl.list_scheduled_content()
+
+
 @router.get("/{content_id}")
 async def get_content(content_id: int, dl: DataLayer = Depends(get_data_layer)):
     c = await dl.get_content(content_id)
     if not c:
         raise HTTPException(status_code=404, detail="Content not found")
     return c
+
+
+@router.post("/{content_id}/schedule")
+async def schedule_content(content_id: int, req: ScheduleRequest, dl: DataLayer = Depends(get_data_layer)):
+    """Schedule approved content for future publishing."""
+    try:
+        scheduled_dt = datetime.datetime.fromisoformat(req.scheduled_at)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid ISO 8601 datetime for scheduled_at")
+
+    c = await dl.get_content(content_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Content not found")
+
+    result = await dl.schedule_content(content_id, scheduled_dt)
+    if not result:
+        raise HTTPException(status_code=404, detail="Content not found")
+
+    await dl.commit()
+    return result
 
 
 @router.post("/{content_id}/action")

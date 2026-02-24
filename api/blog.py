@@ -32,6 +32,14 @@ async def scrape_blog(req: ScrapeRequest, dl: DataLayer = Depends(get_data_layer
         if assets:
             blog_url = assets[0]["url"]
 
+    # Fallback: check subdomain assets with blog-like labels (legacy data)
+    if not blog_url:
+        sub_assets = await dl.list_assets(asset_type="subdomain")
+        for a in sub_assets:
+            if a.get("label", "").lower() in ("blog", "news", "articles"):
+                blog_url = a["url"]
+                break
+
     if not blog_url:
         return {"error": "No blog URL provided and no blog asset found for this org."}
 

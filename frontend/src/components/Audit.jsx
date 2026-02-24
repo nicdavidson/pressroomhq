@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import SeoPR from './SeoPR'
 
 const API = '/api'
 
@@ -209,29 +210,21 @@ function ReadmeResults({ result }) {
 }
 
 // ────────────────────────────────────────
-// SEO Audit Sub-Tab
+// SEO Audit — domain passed as prop, no inputs
 // ────────────────────────────────────────
-function SeoAudit({ onLog, orgId, assets, history, onRefreshHistory }) {
-  const [domain, setDomain] = useState('')
+function SeoAudit({ onLog, orgId, domain, onRefreshHistory, onAuditComplete }) {
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState(null)
-  const [viewingSaved, setViewingSaved] = useState(null)
 
-  const domainAssets = assets.filter(a =>
-    ['subdomain', 'blog', 'docs', 'product', 'page'].includes(a.asset_type) && a.url
-  )
-
-  const runAudit = async (targetDomain) => {
-    const d = targetDomain || domain
+  const runAudit = async () => {
     setRunning(true)
     setResult(null)
-    setViewingSaved(null)
-    onLog?.(`SEO AUDIT — scanning ${d || 'org domain'}...`, 'action')
+    onLog?.(`SEO AUDIT — scanning ${domain || 'org domain'}...`, 'action')
     try {
       const res = await fetch(`${API}/audit/seo`, {
         method: 'POST',
         headers: orgHeaders(orgId),
-        body: JSON.stringify({ domain: d, max_pages: 15 }),
+        body: JSON.stringify({ domain, max_pages: 15 }),
       })
       const data = await res.json()
       if (data.error) {
@@ -242,6 +235,7 @@ function SeoAudit({ onLog, orgId, assets, history, onRefreshHistory }) {
         const score = data.recommendations?.score || 0
         onLog?.(`AUDIT COMPLETE — Score: ${score}/100, ${data.pages_audited} pages, ${data.recommendations?.total_issues || 0} issues`, 'success')
         onRefreshHistory?.()
+        onAuditComplete?.(score, data.audit_id)
       }
     } catch (e) {
       onLog?.(`AUDIT ERROR — ${e.message}`, 'error')
@@ -251,164 +245,57 @@ function SeoAudit({ onLog, orgId, assets, history, onRefreshHistory }) {
     }
   }
 
-  const viewSaved = async (audit) => {
-    try {
-      const res = await fetch(`${API}/audit/history/${audit.id}`, { headers: orgHeaders(orgId) })
-      const data = await res.json()
-      if (data.result) {
-        setViewingSaved(data)
-        setResult(null)
-      }
-    } catch { /* ignore */ }
-  }
-
-  const deleteSaved = async (id, e) => {
-    e.stopPropagation()
-    try {
-      await fetch(`${API}/audit/history/${id}`, { method: 'DELETE', headers: orgHeaders(orgId) })
-      onRefreshHistory?.()
-      if (viewingSaved?.id === id) setViewingSaved(null)
-    } catch { /* ignore */ }
-  }
-
-  const seoHistory = history.filter(h => h.audit_type === 'seo')
-  const activeResult = viewingSaved?.result || result
-  const isViewingSaved = !!viewingSaved
-
   return (
     <>
-      {/* RUN NEW */}
       <div className="settings-section">
-        <div className="section-label">Target</div>
-        <p className="voice-hint">
-          Crawl a site's pages, check SEO elements (titles, meta, headings, images, schema),
-          and get AI-powered recommendations. Results are saved automatically.
-        </p>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          {domainAssets.length > 0 && (
-            <select
-              className="setting-input"
-              style={{ width: 260 }}
-              value={domain}
-              onChange={e => setDomain(e.target.value)}
-            >
-              <option value="">Org domain (default)</option>
-              {domainAssets.map(a => (
-                <option key={a.id} value={a.url}>
-                  {a.label || a.asset_type} — {a.url.replace(/^https?:\/\//, '').slice(0, 40)}
-                </option>
-              ))}
-            </select>
-          )}
-          <input
-            className="setting-input"
-            style={{ flex: 1, minWidth: 200 }}
-            value={domain}
-            onChange={e => setDomain(e.target.value)}
-            placeholder={domainAssets.length > 0 ? 'or type a custom URL' : 'https://example.com (or leave blank for org domain)'}
-            onKeyDown={e => { if (e.key === 'Enter') runAudit() }}
-            spellCheck={false}
-          />
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <button
             className={`btn btn-run ${running ? 'loading' : ''}`}
-            onClick={() => runAudit()}
-            disabled={running}
+            onClick={runAudit}
+            disabled={running || !domain}
           >
             {running ? 'Auditing...' : 'Run SEO Audit'}
           </button>
+          <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
+            {domain ? domain.replace(/^https?:\/\//, '') : 'enter a domain above'}
+          </span>
         </div>
       </div>
 
-      {/* SAVED HISTORY */}
-      {seoHistory.length > 0 && (
-        <div className="settings-section">
-          <div className="section-label">History</div>
-          <div className="audit-history-list">
-            {seoHistory.map(h => (
-              <div
-                key={h.id}
-                className={`audit-history-item ${viewingSaved?.id === h.id ? 'active' : ''}`}
-                onClick={() => viewSaved(h)}
-              >
-                <ScoreBadge score={h.score} />
-                <div className="audit-history-detail">
-                  <span className="audit-history-target">{h.target.replace(/^https?:\/\//, '')}</span>
-                  <span className="audit-history-date">{formatDate(h.created_at)}</span>
-                </div>
-                <span className="audit-history-issues">{h.total_issues} issues</span>
-                <button
-                  className="btn btn-run"
-                  style={{ fontSize: 11, padding: '3px 8px' }}
-                  onClick={(e) => { e.stopPropagation(); runAudit(h.target) }}
-                  disabled={running}
-                  title="Re-run this audit"
-                >
-                  Refresh
-                </button>
-                <button
-                  className="btn-icon"
-                  onClick={(e) => deleteSaved(h.id, e)}
-                  title="Delete"
-                >&times;</button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ERROR */}
       {result?.error && (
         <div className="settings-section">
           <div style={{ color: 'var(--red)', fontSize: 13 }}>{result.error}</div>
         </div>
       )}
 
-      {/* RESULTS — live or saved */}
-      {isViewingSaved && (
-        <div className="audit-saved-banner">
-          Viewing saved audit from {formatDate(viewingSaved.created_at)}
-          <button className="btn btn-run" style={{ fontSize: 11, padding: '3px 10px', marginLeft: 12 }}
-            onClick={() => runAudit(viewingSaved.target)} disabled={running}>
-            {running ? 'Refreshing...' : 'Refresh'}
-          </button>
-          <button className="btn" style={{ fontSize: 11, padding: '3px 10px', marginLeft: 4, color: 'var(--text-dim)', borderColor: 'var(--border)' }}
-            onClick={() => setViewingSaved(null)}>
-            Close
-          </button>
-        </div>
-      )}
-
-      {activeResult && !activeResult.error && <SeoResults result={activeResult} />}
+      {result && !result.error && <SeoResults result={result} />}
     </>
   )
 }
 
 // ────────────────────────────────────────
-// README Audit Sub-Tab
+// README Audit — repo/repoUrl/baseBranch passed as props
 // ────────────────────────────────────────
-function ReadmeAudit({ onLog, orgId, assets, history, onRefreshHistory }) {
-  const [repo, setRepo] = useState('')
+function ReadmeAudit({ onLog, orgId, repo, repoUrl, baseBranch, onRefreshHistory }) {
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState(null)
-  const [viewingSaved, setViewingSaved] = useState(null)
+  const [fixing, setFixing] = useState(false)
+  const [prUrl, setPrUrl] = useState('')
 
-  const repoAssets = assets.filter(a => a.asset_type === 'repo' && a.url)
-
-  const runAudit = async (targetRepo) => {
-    const r = targetRepo || repo
-    if (!r.trim()) {
+  const runAudit = async () => {
+    if (!repo) {
       onLog?.('README AUDIT — no repo specified', 'error')
       return
     }
     setRunning(true)
     setResult(null)
-    setViewingSaved(null)
-    onLog?.(`README AUDIT — analyzing ${r}...`, 'action')
+    setPrUrl('')
+    onLog?.(`README AUDIT — analyzing ${repo}...`, 'action')
     try {
       const res = await fetch(`${API}/audit/readme`, {
         method: 'POST',
         headers: orgHeaders(orgId),
-        body: JSON.stringify({ repo: r }),
+        body: JSON.stringify({ repo }),
       })
       const data = await res.json()
       if (data.error) {
@@ -428,113 +315,77 @@ function ReadmeAudit({ onLog, orgId, assets, history, onRefreshHistory }) {
     }
   }
 
-  const viewSaved = async (audit) => {
+  const fixWithPr = async () => {
+    if (!repoUrl) {
+      onLog?.('README FIX — no repo URL configured', 'error')
+      return
+    }
+    setFixing(true)
+    setPrUrl('')
+    onLog?.(`README FIX — improving README and creating PR...`, 'action')
     try {
-      const res = await fetch(`${API}/audit/history/${audit.id}`, { headers: orgHeaders(orgId) })
-      const data = await res.json()
-      if (data.result) {
-        setViewingSaved(data)
-        setResult(null)
+      const body = { repo_url: repoUrl, base_branch: baseBranch || 'main' }
+      if (result?.audit_id) {
+        body.audit_id = result.audit_id
+      } else if (result?.recommendations?.analysis) {
+        body.recommendations = result.recommendations.analysis
       }
-    } catch { /* ignore */ }
+      const res = await fetch(`${API}/audit/readme/fix`, {
+        method: 'POST',
+        headers: orgHeaders(orgId),
+        body: JSON.stringify(body),
+      })
+      const data = await res.json()
+      if (data.error) {
+        onLog?.(`README FIX FAILED — ${data.error}`, 'error')
+      } else if (data.pr_url) {
+        setPrUrl(data.pr_url)
+        onLog?.(`README PR CREATED — ${data.pr_url}`, 'success')
+      } else {
+        onLog?.('README FIX — no PR created (no changes needed?)', 'warn')
+      }
+    } catch (e) {
+      onLog?.(`README FIX ERROR — ${e.message}`, 'error')
+    } finally {
+      setFixing(false)
+    }
   }
-
-  const deleteSaved = async (id, e) => {
-    e.stopPropagation()
-    try {
-      await fetch(`${API}/audit/history/${id}`, { method: 'DELETE', headers: orgHeaders(orgId) })
-      onRefreshHistory?.()
-      if (viewingSaved?.id === id) setViewingSaved(null)
-    } catch { /* ignore */ }
-  }
-
-  const readmeHistory = history.filter(h => h.audit_type === 'readme')
-  const activeResult = viewingSaved?.result || result
-  const isViewingSaved = !!viewingSaved
 
   return (
     <>
       <div className="settings-section">
-        <div className="section-label">Target Repository</div>
-        <p className="voice-hint">
-          Analyze a GitHub repo's README for quality, structure, and completeness.
-          Results are saved automatically.
-        </p>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          {repoAssets.length > 0 && (
-            <select
-              className="setting-input"
-              style={{ width: 280 }}
-              value={repo}
-              onChange={e => setRepo(e.target.value)}
-            >
-              <option value="">Select a repo...</option>
-              {repoAssets.map(a => {
-                const match = a.url.match(/github\.com\/([^/]+\/[^/]+)/)
-                const repoName = match ? match[1] : a.label || a.url
-                return (
-                  <option key={a.id} value={repoName}>
-                    {repoName}
-                  </option>
-                )
-              })}
-            </select>
-          )}
-          <input
-            className="setting-input"
-            style={{ flex: 1, minWidth: 200 }}
-            value={repo}
-            onChange={e => setRepo(e.target.value)}
-            placeholder={repoAssets.length > 0 ? 'or type owner/repo' : 'owner/repo or GitHub URL'}
-            onKeyDown={e => { if (e.key === 'Enter') runAudit() }}
-            spellCheck={false}
-          />
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <button
             className={`btn btn-run ${running ? 'loading' : ''}`}
-            onClick={() => runAudit()}
-            disabled={running || !repo.trim()}
+            onClick={runAudit}
+            disabled={running || fixing || !repo}
           >
             {running ? 'Auditing...' : 'Run README Audit'}
           </button>
+          {result && !result.error && repoUrl && (
+            <button
+              className={`btn btn-approve ${fixing ? 'loading' : ''}`}
+              onClick={fixWithPr}
+              disabled={fixing || running}
+            >
+              {fixing ? 'Creating PR...' : 'Fix with PR'}
+            </button>
+          )}
+          <span style={{ color: 'var(--text-dim)', fontSize: 12, fontStyle: repo ? 'normal' : 'italic' }}>
+            {repo || 'add a repo above'}
+          </span>
+          {prUrl && (
+            <a
+              href={prUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: 'var(--green)', textDecoration: 'none', fontSize: 12 }}
+            >
+              View PR &rarr;
+            </a>
+          )}
         </div>
       </div>
-
-      {/* SAVED HISTORY */}
-      {readmeHistory.length > 0 && (
-        <div className="settings-section">
-          <div className="section-label">History</div>
-          <div className="audit-history-list">
-            {readmeHistory.map(h => (
-              <div
-                key={h.id}
-                className={`audit-history-item ${viewingSaved?.id === h.id ? 'active' : ''}`}
-                onClick={() => viewSaved(h)}
-              >
-                <ScoreBadge score={h.score} />
-                <div className="audit-history-detail">
-                  <span className="audit-history-target">{h.target}</span>
-                  <span className="audit-history-date">{formatDate(h.created_at)}</span>
-                </div>
-                <span className="audit-history-issues">{h.total_issues} missing</span>
-                <button
-                  className="btn btn-run"
-                  style={{ fontSize: 11, padding: '3px 8px' }}
-                  onClick={(e) => { e.stopPropagation(); runAudit(h.target) }}
-                  disabled={running}
-                  title="Re-run this audit"
-                >
-                  Refresh
-                </button>
-                <button
-                  className="btn-icon"
-                  onClick={(e) => deleteSaved(h.id, e)}
-                  title="Delete"
-                >&times;</button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {result?.error && (
         <div className="settings-section">
@@ -542,21 +393,7 @@ function ReadmeAudit({ onLog, orgId, assets, history, onRefreshHistory }) {
         </div>
       )}
 
-      {isViewingSaved && (
-        <div className="audit-saved-banner">
-          Viewing saved audit from {formatDate(viewingSaved.created_at)}
-          <button className="btn btn-run" style={{ fontSize: 11, padding: '3px 10px', marginLeft: 12 }}
-            onClick={() => runAudit(viewingSaved.target)} disabled={running}>
-            {running ? 'Refreshing...' : 'Refresh'}
-          </button>
-          <button className="btn" style={{ fontSize: 11, padding: '3px 10px', marginLeft: 4, color: 'var(--text-dim)', borderColor: 'var(--border)' }}
-            onClick={() => setViewingSaved(null)}>
-            Close
-          </button>
-        </div>
-      )}
-
-      {activeResult && !activeResult.error && <ReadmeResults result={activeResult} />}
+      {result && !result.error && <ReadmeResults result={result} />}
     </>
   )
 }
@@ -574,12 +411,283 @@ function ScoreBadge({ score }) {
 }
 
 // ────────────────────────────────────────
-// Main Audit Component — Tabbed
+// Properties Manager (site <-> repo bonds)
+// ────────────────────────────────────────
+function PropertyManager({ orgId, onLog, properties, assets, onRefresh, onSelectProperty, activePropertyId }) {
+  const [showAdd, setShowAdd] = useState(false)
+  const [form, setForm] = useState({ name: '', domain: '', repo_url: '', base_branch: 'main' })
+
+  const siteAssets = (assets || []).filter(a =>
+    ['subdomain', 'blog', 'docs', 'product', 'page'].includes(a.asset_type) && a.url
+  )
+  const repoAssets = (assets || []).filter(a => a.asset_type === 'repo' && a.url)
+
+  const handleSiteSelect = (url) => {
+    if (!url) return
+    setForm(f => ({
+      ...f,
+      domain: url,
+      name: f.name || siteAssets.find(a => a.url === url)?.label || url.replace(/^https?:\/\//, ''),
+    }))
+  }
+
+  const handleRepoSelect = (url) => {
+    if (!url) return
+    setForm(f => ({ ...f, repo_url: url }))
+  }
+
+  const saveProperty = async () => {
+    if (!form.name.trim() || !form.domain.trim()) return
+    try {
+      const res = await fetch(`${API}/properties`, {
+        method: 'POST', headers: orgHeaders(orgId),
+        body: JSON.stringify(form),
+      })
+      const data = await res.json()
+      if (data.error) {
+        onLog?.(`PROPERTY ERROR — ${data.error}`, 'error')
+      } else {
+        onLog?.(`PROPERTY ADDED — ${data.name}`, 'success')
+        setForm({ name: '', domain: '', repo_url: '', base_branch: 'main' })
+        setShowAdd(false)
+        onRefresh()
+      }
+    } catch (e) {
+      onLog?.(`SAVE FAILED — ${e.message}`, 'error')
+    }
+  }
+
+  const deleteProperty = async (id, e) => {
+    e.stopPropagation()
+    try {
+      await fetch(`${API}/properties/${id}`, { method: 'DELETE', headers: orgHeaders(orgId) })
+      onRefresh()
+    } catch { /* ignore */ }
+  }
+
+  return (
+    <div className="settings-section">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div className="section-label" style={{ margin: 0 }}>Properties</div>
+        {!showAdd && (
+          <button className="btn btn-sm btn-approve" onClick={() => setShowAdd(true)}>+ Bond Site</button>
+        )}
+      </div>
+
+      {properties.length === 0 && !showAdd && (
+        <p className="voice-hint" style={{ marginBottom: 0 }}>
+          Bond a site to its repo, or use ad-hoc inputs below.
+        </p>
+      )}
+
+      {properties.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: showAdd ? 12 : 0 }}>
+          {properties.map(p => (
+            <div
+              key={p.id}
+              className={`property-card ${activePropertyId === p.id ? 'active' : ''}`}
+              onClick={() => onSelectProperty(activePropertyId === p.id ? null : p)}
+            >
+              <div className="property-card-name">{p.name}</div>
+              <div className="property-card-domain">{p.domain.replace(/^https?:\/\//, '')}</div>
+              {p.repo_url && (
+                <div className="property-card-repo">
+                  {p.repo_url.replace(/^https?:\/\/github\.com\//, '')}
+                </div>
+              )}
+              {!p.repo_url && (
+                <div className="property-card-repo" style={{ color: 'var(--text-dim)', fontStyle: 'italic' }}>no repo linked</div>
+              )}
+              {p.last_audit_score != null && (
+                <div className="property-card-score" style={{
+                  color: p.last_audit_score >= 80 ? 'var(--green)' : p.last_audit_score >= 50 ? 'var(--amber)' : 'var(--red)'
+                }}>
+                  {p.last_audit_score}/100
+                </div>
+              )}
+              <button
+                className="btn-icon"
+                onClick={(e) => deleteProperty(p.id, e)}
+                title="Remove property"
+                style={{ position: 'absolute', top: 4, right: 6, fontSize: 14 }}
+              >&times;</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showAdd && (
+        <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 4, padding: 12, marginBottom: 0 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+            <input
+              className="setting-input"
+              style={{ flex: 1, minWidth: 150 }}
+              value={form.name}
+              onChange={e => setForm({ ...form, name: e.target.value })}
+              placeholder="Property name (e.g. DreamFactory Docs)"
+            />
+          </div>
+          <div style={{ marginBottom: 4 }}>
+            <label style={{ display: 'block', color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Site</label>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {siteAssets.length > 0 && (
+                <select
+                  className="setting-input"
+                  style={{ width: 240 }}
+                  value={siteAssets.some(a => a.url === form.domain) ? form.domain : ''}
+                  onChange={e => handleSiteSelect(e.target.value)}
+                >
+                  <option value="">Pick from assets...</option>
+                  {siteAssets.map(a => (
+                    <option key={a.id} value={a.url}>
+                      {a.label || a.asset_type} — {a.url.replace(/^https?:\/\//, '').slice(0, 40)}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <input
+                className="setting-input"
+                style={{ flex: 1, minWidth: 200 }}
+                value={form.domain}
+                onChange={e => setForm({ ...form, domain: e.target.value })}
+                placeholder={siteAssets.length > 0 ? 'or type a URL' : 'Site URL (e.g. docs.dreamfactory.com)'}
+                spellCheck={false}
+              />
+            </div>
+          </div>
+          <div style={{ marginBottom: 8, marginTop: 8 }}>
+            <label style={{ display: 'block', color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Repo (optional)</label>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {repoAssets.length > 0 && (
+                <select
+                  className="setting-input"
+                  style={{ width: 280 }}
+                  value={repoAssets.some(a => a.url === form.repo_url) ? form.repo_url : ''}
+                  onChange={e => handleRepoSelect(e.target.value)}
+                >
+                  <option value="">Pick from assets...</option>
+                  {repoAssets.map(a => {
+                    const match = a.url.match(/github\.com\/([^/]+\/[^/]+)/)
+                    const label = match ? match[1] : a.label || a.url
+                    return (
+                      <option key={a.id} value={a.url}>{label}</option>
+                    )
+                  })}
+                </select>
+              )}
+              <input
+                className="setting-input"
+                style={{ flex: 1, minWidth: 200 }}
+                value={form.repo_url}
+                onChange={e => setForm({ ...form, repo_url: e.target.value })}
+                placeholder={repoAssets.length > 0 ? 'or type a repo URL' : 'https://github.com/owner/repo'}
+                spellCheck={false}
+              />
+              <input
+                className="setting-input"
+                style={{ width: 100 }}
+                value={form.base_branch}
+                onChange={e => setForm({ ...form, base_branch: e.target.value })}
+                placeholder="main"
+                spellCheck={false}
+              />
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-approve btn-sm" onClick={saveProperty}>Save Property</button>
+            <button className="btn btn-sm" onClick={() => setShowAdd(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+// ────────────────────────────────────────
+// Shared Audit History
+// ────────────────────────────────────────
+function AuditHistory({ orgId, history, onRefreshHistory }) {
+  const [viewingSaved, setViewingSaved] = useState(null)
+
+  const viewSaved = async (audit) => {
+    try {
+      const res = await fetch(`${API}/audit/history/${audit.id}`, { headers: orgHeaders(orgId) })
+      const data = await res.json()
+      if (data.result) setViewingSaved(data)
+    } catch { /* ignore */ }
+  }
+
+  const deleteSaved = async (id, e) => {
+    e.stopPropagation()
+    try {
+      await fetch(`${API}/audit/history/${id}`, { method: 'DELETE', headers: orgHeaders(orgId) })
+      onRefreshHistory?.()
+      if (viewingSaved?.id === id) setViewingSaved(null)
+    } catch { /* ignore */ }
+  }
+
+  if (history.length === 0) return null
+
+  return (
+    <>
+      <div className="settings-section">
+        <div className="section-label">Audit History</div>
+        <div className="audit-history-list">
+          {history.map(h => (
+            <div
+              key={h.id}
+              className={`audit-history-item ${viewingSaved?.id === h.id ? 'active' : ''}`}
+              onClick={() => viewSaved(h)}
+            >
+              <ScoreBadge score={h.score} />
+              <span className="audit-history-type">{h.audit_type === 'seo' ? 'SEO' : 'README'}</span>
+              <div className="audit-history-detail">
+                <span className="audit-history-target">{h.target.replace(/^https?:\/\//, '')}</span>
+                <span className="audit-history-date">{formatDate(h.created_at)}</span>
+              </div>
+              <span className="audit-history-issues">{h.total_issues} {h.audit_type === 'seo' ? 'issues' : 'missing'}</span>
+              <button
+                className="btn-icon"
+                onClick={(e) => deleteSaved(h.id, e)}
+                title="Delete"
+              >&times;</button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {viewingSaved && (
+        <>
+          <div className="audit-saved-banner">
+            Viewing saved {viewingSaved.audit_type === 'seo' ? 'SEO' : 'README'} audit from {formatDate(viewingSaved.created_at)}
+            <button className="btn" style={{ fontSize: 11, padding: '3px 10px', marginLeft: 12, color: 'var(--text-dim)', borderColor: 'var(--border)' }}
+              onClick={() => setViewingSaved(null)}>
+              Close
+            </button>
+          </div>
+          {viewingSaved.audit_type === 'seo' && viewingSaved.result && <SeoResults result={viewingSaved.result} />}
+          {viewingSaved.audit_type === 'readme' && viewingSaved.result && <ReadmeResults result={viewingSaved.result} />}
+        </>
+      )}
+    </>
+  )
+}
+
+
+// ────────────────────────────────────────
+// Main Audit Component
 // ────────────────────────────────────────
 export default function Audit({ onLog, orgId }) {
-  const [tab, setTab] = useState('seo')
   const [assets, setAssets] = useState([])
   const [history, setHistory] = useState([])
+  const [properties, setProperties] = useState([])
+  const [activeProperty, setActiveProperty] = useState(null)
+
+  // Ad-hoc inputs — used when no property is selected
+  const [adhocDomain, setAdhocDomain] = useState('')
+  const [adhocRepo, setAdhocRepo] = useState('')
+  const [adhocBranch, setAdhocBranch] = useState('main')
 
   const loadAssets = useCallback(async () => {
     try {
@@ -597,30 +705,180 @@ export default function Audit({ onLog, orgId }) {
     } catch { /* ignore */ }
   }, [orgId])
 
-  useEffect(() => { loadAssets(); loadHistory() }, [loadAssets, loadHistory])
+  const loadProperties = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/properties`, { headers: orgHeaders(orgId) })
+      const data = await res.json()
+      setProperties(Array.isArray(data) ? data : [])
+    } catch { /* ignore */ }
+  }, [orgId])
+
+  useEffect(() => { loadAssets(); loadHistory(); loadProperties() }, [loadAssets, loadHistory, loadProperties])
+
+  const handleSelectProperty = (prop) => {
+    setActiveProperty(prop)
+  }
+
+  // After an audit completes, update the property's last score
+  const handleAuditComplete = async (score, auditId) => {
+    if (!activeProperty) return
+    try {
+      await fetch(`${API}/properties/${activeProperty.id}`, {
+        method: 'PUT', headers: orgHeaders(orgId),
+        body: JSON.stringify({ last_audit_score: score, last_audit_id: auditId }),
+      })
+      loadProperties()
+    } catch { /* ignore */ }
+  }
+
+  // Asset lists for ad-hoc dropdowns
+  const siteAssets = assets.filter(a =>
+    ['subdomain', 'blog', 'docs', 'product', 'page'].includes(a.asset_type) && a.url
+  )
+  const repoAssets = assets.filter(a => a.asset_type === 'repo' && a.url)
+
+  // Derive effective values: property wins, ad-hoc is fallback
+  const effectiveDomain = activeProperty?.domain || adhocDomain
+  const effectiveRepoUrl = activeProperty?.repo_url || adhocRepo
+  const effectiveBranch = activeProperty?.base_branch || adhocBranch
+  // Extract owner/repo for README audit
+  const repoSlug = (() => {
+    if (!effectiveRepoUrl) return ''
+    const match = effectiveRepoUrl.match(/github\.com\/([^/]+\/[^/]+)/)
+    return match ? match[1] : effectiveRepoUrl
+  })()
 
   return (
     <div className="settings-page">
       <div className="settings-header">
-        <h2 className="settings-title">Audit</h2>
-        <div className="audit-tabs">
-          <button
-            className={`audit-tab ${tab === 'seo' ? 'active' : ''}`}
-            onClick={() => setTab('seo')}
-          >
-            SEO Audit
-          </button>
-          <button
-            className={`audit-tab ${tab === 'readme' ? 'active' : ''}`}
-            onClick={() => setTab('readme')}
-          >
-            README Audit
-          </button>
-        </div>
+        <h2 className="settings-title">SEO Audit</h2>
       </div>
 
-      {tab === 'seo' && <SeoAudit onLog={onLog} orgId={orgId} assets={assets} history={history} onRefreshHistory={loadHistory} />}
-      {tab === 'readme' && <ReadmeAudit onLog={onLog} orgId={orgId} assets={assets} history={history} onRefreshHistory={loadHistory} />}
+      <PropertyManager
+        orgId={orgId}
+        onLog={onLog}
+        properties={properties}
+        assets={assets}
+        onRefresh={loadProperties}
+        onSelectProperty={handleSelectProperty}
+        activePropertyId={activeProperty?.id}
+      />
+
+      {/* ── AD-HOC INPUTS — only when no property selected ── */}
+      {!activeProperty && (
+        <div className="settings-section">
+          <div className="section-label" style={{ marginBottom: 6 }}>Target</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+            <div style={{ flex: 2, minWidth: 200 }}>
+              <label style={{ display: 'block', color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Site</label>
+              {siteAssets.length > 0 && (
+                <select
+                  className="setting-input"
+                  style={{ width: '100%', marginBottom: 4 }}
+                  value={siteAssets.some(a => a.url === adhocDomain) ? adhocDomain : ''}
+                  onChange={e => { if (e.target.value) setAdhocDomain(e.target.value) }}
+                >
+                  <option value="">Pick from assets...</option>
+                  {siteAssets.map(a => (
+                    <option key={a.id} value={a.url}>
+                      {a.label || a.asset_type} — {a.url.replace(/^https?:\/\//, '').slice(0, 40)}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <input
+                className="setting-input"
+                style={{ width: '100%' }}
+                value={adhocDomain}
+                onChange={e => setAdhocDomain(e.target.value)}
+                placeholder="docs.example.com"
+                spellCheck={false}
+              />
+            </div>
+            <div style={{ flex: 2, minWidth: 200 }}>
+              <label style={{ display: 'block', color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Repo</label>
+              {repoAssets.length > 0 && (
+                <select
+                  className="setting-input"
+                  style={{ width: '100%', marginBottom: 4 }}
+                  value={repoAssets.some(a => a.url === adhocRepo) ? adhocRepo : ''}
+                  onChange={e => { if (e.target.value) setAdhocRepo(e.target.value) }}
+                >
+                  <option value="">Pick from assets...</option>
+                  {repoAssets.map(a => {
+                    const match = a.url.match(/github\.com\/([^/]+\/[^/]+)/)
+                    const label = match ? match[1] : a.label || a.url
+                    return <option key={a.id} value={a.url}>{label}</option>
+                  })}
+                </select>
+              )}
+              <input
+                className="setting-input"
+                style={{ width: '100%' }}
+                value={adhocRepo}
+                onChange={e => setAdhocRepo(e.target.value)}
+                placeholder="https://github.com/owner/repo"
+                spellCheck={false}
+              />
+            </div>
+            <div style={{ width: 100 }}>
+              <label style={{ display: 'block', color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Branch</label>
+              <input
+                className="setting-input"
+                style={{ width: '100%' }}
+                value={adhocBranch}
+                onChange={e => setAdhocBranch(e.target.value)}
+                placeholder="main"
+                spellCheck={false}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── SITE AUDIT ── */}
+      <div className="audit-section-divider">
+        <span className="section-label">Site Audit</span>
+        {activeProperty?.domain && <span className="audit-section-from">{activeProperty.name}</span>}
+      </div>
+      <SeoAudit
+        onLog={onLog}
+        orgId={orgId}
+        domain={effectiveDomain}
+        onRefreshHistory={loadHistory}
+        onAuditComplete={handleAuditComplete}
+      />
+
+      {/* ── README AUDIT ── */}
+      <div className="audit-section-divider">
+        <span className="section-label">README Audit</span>
+        {activeProperty?.repo_url && <span className="audit-section-from">{activeProperty.name}</span>}
+      </div>
+      <ReadmeAudit
+        onLog={onLog}
+        orgId={orgId}
+        repo={repoSlug}
+        repoUrl={effectiveRepoUrl}
+        baseBranch={effectiveBranch}
+        onRefreshHistory={loadHistory}
+      />
+
+      {/* ── FIX WITH PR ── */}
+      <div className="audit-section-divider">
+        <span className="section-label">Fix with PR</span>
+        {activeProperty?.repo_url && <span className="audit-section-from">{activeProperty.name}</span>}
+        {!effectiveRepoUrl && <span className="audit-section-from dim">needs a repo</span>}
+      </div>
+      <SeoPR
+        onLog={onLog}
+        orgId={orgId}
+        repoUrl={effectiveRepoUrl}
+        domain={effectiveDomain}
+        baseBranch={effectiveBranch}
+      />
+
+      {/* ── HISTORY ── */}
+      <AuditHistory orgId={orgId} history={history} onRefreshHistory={loadHistory} />
     </div>
   )
 }

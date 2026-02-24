@@ -12,7 +12,8 @@ import Team from './components/Team'
 import Blog from './components/Blog'
 import EmailDrafts from './components/EmailDrafts'
 import HubSpot from './components/HubSpot'
-import SeoPR from './components/SeoPR'
+import Dashboard from './components/Dashboard'
+import ChannelPicker, { loadSavedChannels, saveChannels } from './components/ChannelPicker'
 
 const API = '/api'
 
@@ -61,6 +62,44 @@ function orgFetch(url, orgId, opts = {}) {
   return fetch(url, { ...opts, headers })
 }
 
+function NavDropdown({ label, items, currentView, setView }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  const isActive = items.some(i => i.view === currentView)
+  const activeLabel = items.find(i => i.view === currentView)?.label
+
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  return (
+    <div className="nav-group" ref={ref}>
+      <button
+        className={`nav-group-label ${isActive ? 'active' : ''}`}
+        onClick={() => setOpen(!open)}
+      >
+        {isActive ? activeLabel : label}
+        <span className="caret">▾</span>
+      </button>
+      {open && (
+        <div className="nav-dropdown">
+          {items.map(item => (
+            <button
+              key={item.view}
+              className={`nav-dropdown-item ${currentView === item.view ? 'active' : ''}`}
+              onClick={() => { setView(item.view); setOpen(false) }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
   const [signals, setSignals] = useState([])
   const [queue, setQueue] = useState([])
@@ -79,6 +118,11 @@ export default function App() {
 
   // Wire panel state
   const [wireCollapsed, setWireCollapsed] = useState({})
+
+  // Channel picker + post-as state
+  const [selectedChannels, setSelectedChannels] = useState(() => loadSavedChannels(currentOrg?.id))
+  const [teamMembers, setTeamMembers] = useState([])
+  const [postAs, setPostAs] = useState('')
 
   // Loading states per action
   const [loading, setLoading] = useState({})
@@ -184,6 +228,10 @@ export default function App() {
     setQueue([])
     setAllContent([])
     setExpanded(null)
+    setPostAs('')
+    if (orgId) {
+      orgFetch(`${API}/team`, orgId).then(r => r.json()).then(d => setTeamMembers(Array.isArray(d) ? d : [])).catch(() => {})
+    }
   }, [orgId])
 
   // Wrap action in loading state
@@ -259,9 +307,13 @@ export default function App() {
   })
 
   const runGenerate = withLoading('generate', async () => {
-    log('GENERATE — Claude is writing the stories...', 'action')
+    saveChannels(orgId, selectedChannels)
+    log(`GENERATE — ${selectedChannels.length} channels...`, 'action')
     try {
-      const res = await orgFetch(`${API}/pipeline/generate`, orgId, { method: 'POST' })
+      const res = await orgFetch(`${API}/pipeline/generate`, orgId, {
+        method: 'POST',
+        body: JSON.stringify({ channels: selectedChannels, team_member_id: postAs ? Number(postAs) : null }),
+      })
       const data = await res.json()
       if (data.error) {
         log(`GENERATE BLOCKED — ${data.error}`, 'error')
@@ -279,10 +331,14 @@ export default function App() {
   })
 
   const runFull = withLoading('full', async () => {
+    saveChannels(orgId, selectedChannels)
     log('FULL RUN — scout + brief + generate + humanize', 'action')
     log('  Scanning sources...', 'detail')
     try {
-      const res = await orgFetch(`${API}/pipeline/run`, orgId, { method: 'POST' })
+      const res = await orgFetch(`${API}/pipeline/run`, orgId, {
+        method: 'POST',
+        body: JSON.stringify({ channels: selectedChannels, team_member_id: postAs ? Number(postAs) : null }),
+      })
       const data = await res.json()
       if (data.status === 'no_signals') {
         log('WIRE QUIET — no signals found. Try widening search.', 'warn')
@@ -404,18 +460,26 @@ export default function App() {
           <nav className="nav-tabs">
             <button className={`nav-tab ${view === 'desk' ? 'active' : ''}`} onClick={() => setView('desk')}>Desk</button>
             <button className={`nav-tab ${view === 'scout' ? 'active' : ''}`} onClick={() => setView('scout')}>Scout</button>
-            <button className={`nav-tab ${view === 'voice' ? 'active' : ''}`} onClick={() => setView('voice')}>Voice</button>
-            <button className={`nav-tab ${view === 'import' ? 'active' : ''}`} onClick={() => setView('import')}>Import</button>
-            <button className={`nav-tab ${view === 'blog' ? 'active' : ''}`} onClick={() => setView('blog')}>Blog</button>
-            <button className={`nav-tab ${view === 'connections' ? 'active' : ''}`} onClick={() => setView('connections')}>Connect</button>
-            <button className={`nav-tab ${view === 'hubspot' ? 'active' : ''}`} onClick={() => setView('hubspot')}>HubSpot</button>
-            <button className={`nav-tab ${view === 'assets' ? 'active' : ''}`} onClick={() => setView('assets')}>Assets</button>
-            <button className={`nav-tab ${view === 'team' ? 'active' : ''}`} onClick={() => setView('team')}>Team</button>
             <button className={`nav-tab ${view === 'stories' ? 'active' : ''}`} onClick={() => setView('stories')}>Stories</button>
-            <button className={`nav-tab ${view === 'email' ? 'active' : ''}`} onClick={() => setView('email')}>Email</button>
-            <button className={`nav-tab ${view === 'audit' ? 'active' : ''}`} onClick={() => setView('audit')}>Audit</button>
-            <button className={`nav-tab ${view === 'seopr' ? 'active' : ''}`} onClick={() => setView('seopr')}>SEO PR</button>
-            <button className={`nav-tab ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>Account</button>
+            <span className="nav-divider" />
+            <NavDropdown label="Editorial" items={[
+              { view: 'voice', label: 'Voice' },
+              { view: 'import', label: 'Import' },
+              { view: 'blog', label: 'Blog' },
+              { view: 'email', label: 'Email' },
+              { view: 'hubspot', label: 'HubSpot' },
+            ]} currentView={view} setView={setView} />
+            <NavDropdown label="Intel" items={[
+              { view: 'dashboard', label: 'Dashboard' },
+              { view: 'audit', label: 'SEO Audit' },
+              { view: 'team', label: 'Team' },
+              { view: 'assets', label: 'Assets' },
+            ]} currentView={view} setView={setView} />
+            <NavDropdown label="Config" items={[
+              { view: 'connections', label: 'Connect' },
+              { view: 'settings', label: 'Account' },
+            ]} currentView={view} setView={setView} />
+            <span className="nav-divider" />
             <button className={`nav-tab ${view === 'onboard' ? 'active' : ''}`} onClick={() => setView('onboard')}>+ Company</button>
           </nav>
         </div>
@@ -476,7 +540,7 @@ export default function App() {
             </div>
           )}
 
-          {(view === 'settings' || view === 'voice' || view === 'scout' || view === 'import' || view === 'blog' || view === 'onboard' || view === 'connections' || view === 'hubspot' || view === 'audit' || view === 'seopr' || view === 'assets' || view === 'team') && (
+          {(view === 'settings' || view === 'voice' || view === 'scout' || view === 'import' || view === 'blog' || view === 'onboard' || view === 'connections' || view === 'hubspot' || view === 'audit' || view === 'assets' || view === 'team' || view === 'dashboard') && (
             <div className="pressroom" style={{ gridTemplateColumns: '1fr' }}>
               <div className="desk-area" style={{ gridTemplateRows: '1fr 220px' }}>
                 {view === 'settings' && <Settings onLog={log} orgId={orgId} />}
@@ -486,11 +550,11 @@ export default function App() {
                 {view === 'blog' && <Blog orgId={orgId} />}
                 {view === 'onboard' && <Onboard onLog={log} onComplete={onOnboardComplete} />}
                 {view === 'connections' && <Connections onLog={log} orgId={orgId} />}
-                {view === 'hubspot' && <HubSpot onLog={log} orgId={orgId} />}
+                {view === 'hubspot' && <HubSpot onLog={log} orgId={orgId} onNavigate={setView} />}
                 {view === 'audit' && <Audit onLog={log} orgId={orgId} />}
-                {view === 'seopr' && <SeoPR onLog={log} orgId={orgId} />}
                 {view === 'assets' && <Assets orgId={orgId} />}
                 {view === 'team' && <Team orgId={orgId} />}
+                {view === 'dashboard' && <Dashboard orgId={orgId} />}
                 <div className="log-panel">
                   <div className="panel-header">
                     <span>Activity Log</span>
@@ -577,6 +641,19 @@ export default function App() {
                   <span style={{ marginLeft: 'auto', color: 'var(--text-dim)', fontSize: 12, alignSelf: 'center' }}>
                     {queuedCount} queued &middot; {approvedCount} approved &middot; {publishedCount} published
                   </span>
+                </div>
+                <div className="toolbar" style={{ paddingTop: 0, alignItems: 'center' }}>
+                  <ChannelPicker selected={selectedChannels} onChange={setSelectedChannels} />
+                  <select
+                    className="post-as-select"
+                    value={postAs}
+                    onChange={e => setPostAs(e.target.value)}
+                  >
+                    <option value="">Post as: Company</option>
+                    {teamMembers.map(m => (
+                      <option key={m.id} value={m.id}>Post as: {m.name}</option>
+                    ))}
+                  </select>
                 </div>
 
                 {!currentOrg && (

@@ -234,7 +234,167 @@ async def scout_rss(feeds: list[str] | None = None) -> list[dict]:
     return signals
 
 
-async def run_full_scout(since_hours: int = 24, org_settings: dict | None = None) -> list[dict]:
+async def scout_web_search(queries: list[str], company_context: str = "",
+                           api_key: str | None = None) -> list[dict]:
+    """Use Claude web search to find industry trends and news for content creation."""
+    if not queries:
+        return []
+
+    signals = []
+    try:
+        client = anthropic.Anthropic(api_key=api_key or settings.anthropic_api_key)
+
+        for query in queries[:6]:  # cap at 6 queries to limit cost
+            try:
+                response = client.messages.create(
+                    model=settings.claude_model_fast,
+                    max_tokens=2000,
+                    tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                    messages=[{"role": "user", "content": (
+                        f"Search the web for recent news and trends about: {query}\n\n"
+                        f"Company context: {company_context}\n\n"
+                        "Find 3-5 recent, specific stories or developments that a content "
+                        "team could write about. For each, give me:\n"
+                        "- A headline\n"
+                        "- A 1-2 sentence summary\n"
+                        "- The source URL\n\n"
+                        "Focus on things from the last 7 days. Be specific — real stories, "
+                        "real URLs, real developments. No generic advice."
+                    )}],
+                )
+
+                # Extract text and citations from the response
+                text_parts = []
+                urls_found = []
+                for block in response.content:
+                    if block.type == "text":
+                        text_parts.append(block.text)
+                    elif block.type == "web_search_tool_result":
+                        for result in (block.content or []):
+                            url = result.get("url") if isinstance(result, dict) else getattr(result, "url", None)
+                            if url:
+                                title = result.get("title", "") if isinstance(result, dict) else getattr(result, "title", "")
+                                urls_found.append({"url": url, "title": title})
+
+                full_text = "\n".join(text_parts)
+                if not full_text.strip():
+                    continue
+
+                # Create one signal per query with the full response
+                signals.append({
+                    "type": SignalType.web_search,
+                    "source": f"web:{query}",
+                    "title": f"Web trends: {query}",
+                    "body": full_text[:3000],
+                    "url": urls_found[0]["url"] if urls_found else "",
+                    "raw_data": json.dumps({"query": query, "urls": urls_found[:10]})[:5000],
+                })
+
+                log.info("WEB SEARCH — query=%s → %d chars, %d URLs", query, len(full_text), len(urls_found))
+
+            except Exception as e:
+                log.warning("Web search failed for query '%s': %s", query, e)
+                continue
+
+    except Exception as e:
+        log.warning("Web search scout failed: %s", e)
+
+    return signals
+
+
+async def scout_visibility_check(queries: list[str], domain: str,
+                                  api_key: str | None = None) -> dict:
+    """Check how visible a company's domain is when Claude searches for related topics.
+
+    Returns a report with per-query visibility scores.
+    """
+    if not queries or not domain:
+        return {"error": "Need queries and domain to check visibility"}
+
+    # Normalize domain — strip protocol and trailing slash
+    domain_clean = domain.lower().replace("https://", "").replace("http://", "").rstrip("/")
+
+    results = []
+    total_found = 0
+    total_queries = 0
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key or settings.anthropic_api_key)
+
+        for query in queries[:10]:
+            total_queries += 1
+            try:
+                response = client.messages.create(
+                    model=settings.claude_model_fast,
+                    max_tokens=1500,
+                    tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                    messages=[{"role": "user", "content": (
+                        f"Search the web for: {query}\n\n"
+                        "List ALL the websites and URLs that appear in the search results. "
+                        "Include every URL you find. Be thorough."
+                    )}],
+                )
+
+                # Scan all response content for domain mentions
+                found = False
+                all_urls = []
+                domain_urls = []
+                position = None
+
+                for block in response.content:
+                    if block.type == "web_search_tool_result":
+                        idx = 0
+                        for result in (block.content or []):
+                            url = result.get("url") if isinstance(result, dict) else getattr(result, "url", None)
+                            if url:
+                                idx += 1
+                                all_urls.append(url)
+                                if domain_clean in url.lower():
+                                    found = True
+                                    domain_urls.append(url)
+                                    if position is None:
+                                        position = idx
+                    elif block.type == "text":
+                        text = block.text.lower()
+                        if domain_clean in text:
+                            found = True
+
+                if found:
+                    total_found += 1
+
+                results.append({
+                    "query": query,
+                    "found": found,
+                    "position": position,
+                    "domain_urls": domain_urls,
+                    "total_results": len(all_urls),
+                })
+
+                log.info("VISIBILITY — query=%s domain=%s found=%s pos=%s (%d results)",
+                         query, domain_clean, found, position, len(all_urls))
+
+            except Exception as e:
+                log.warning("Visibility check failed for query '%s': %s", query, e)
+                results.append({"query": query, "found": False, "error": str(e)})
+
+    except Exception as e:
+        log.warning("Visibility check failed: %s", e)
+        return {"error": str(e)}
+
+    score = round((total_found / total_queries * 100)) if total_queries > 0 else 0
+
+    return {
+        "domain": domain_clean,
+        "score": score,
+        "queries_checked": total_queries,
+        "queries_found": total_found,
+        "results": results,
+    }
+
+
+async def run_full_scout(since_hours: int = 24, org_settings: dict | None = None,
+                         api_key: str | None = None,
+                         company_context: str = "") -> list[dict]:
     """Run all scout sources. Uses org-specific settings if provided."""
     all_signals = []
 
@@ -244,6 +404,7 @@ async def run_full_scout(since_hours: int = 24, org_settings: dict | None = None
         hn_kw = _parse_json_list(org_settings.get("scout_hn_keywords", ""), settings.scout_hn_keywords)
         subs = _parse_json_list(org_settings.get("scout_subreddits", ""), settings.scout_subreddits)
         rss = _parse_json_list(org_settings.get("scout_rss_feeds", ""), settings.scout_rss_feeds)
+        web_queries = _parse_json_list(org_settings.get("scout_web_queries", ""), [])
         gh_token = org_settings.get("github_token", "") or settings.github_token
 
         # Auto-discover GitHub repos if we have a GitHub URL but few/no repos
@@ -271,10 +432,11 @@ async def run_full_scout(since_hours: int = 24, org_settings: dict | None = None
         hn_kw = settings.scout_hn_keywords
         subs = settings.scout_subreddits
         rss = settings.scout_rss_feeds
+        web_queries = []
         gh_token = settings.github_token
 
-    log.info("SCOUT — repos=%d repos, hn_kw=%d terms, subs=%d subs, rss=%d feeds",
-             len(repos), len(hn_kw), len(subs), len(rss))
+    log.info("SCOUT — repos=%d repos, hn_kw=%d terms, subs=%d subs, rss=%d feeds, web=%d queries",
+             len(repos), len(hn_kw), len(subs), len(rss), len(web_queries))
 
     for repo in repos:
         all_signals.extend(await scout_github_releases(repo, since_hours, gh_token))
@@ -283,6 +445,12 @@ async def run_full_scout(since_hours: int = 24, org_settings: dict | None = None
     all_signals.extend(await scout_hackernews(hn_kw))
     all_signals.extend(await scout_reddit(subs))
     all_signals.extend(await scout_rss(rss))
+
+    # Web search — Claude searches for trends related to configured queries
+    if web_queries:
+        all_signals.extend(await scout_web_search(
+            web_queries, company_context=company_context, api_key=api_key,
+        ))
 
     return all_signals
 
@@ -372,3 +540,77 @@ Rules:
     except Exception as e:
         log.warning("Relevance filter failed (%s), keeping all signals", e)
         return signals
+
+
+# ──────────────────────────────────────
+# Source Suggestions
+# ──────────────────────────────────────
+
+SUGGEST_PROMPT = """You are a marketing intelligence analyst. Given a company profile, suggest monitoring sources for a news scout system.
+
+Return a JSON object with these keys:
+- scout_subreddits: array of subreddit names (no r/ prefix) where this company's audience or competitors are active
+- scout_hn_keywords: array of Hacker News search keywords/phrases relevant to this company's space
+- scout_rss_feeds: array of RSS feed URLs for industry blogs, news sites, or competitors
+- scout_web_queries: array of search queries to find trending topics in this space
+
+Guidelines:
+- 3-6 items per category
+- Subreddits should be active communities, not dead ones
+- HN keywords should catch relevant discussions (product names, tech terms, industry phrases)
+- RSS feeds should be real, working feed URLs from known tech/industry blogs
+- Web queries should find emerging trends, not just the company's own content
+- Focus on the company's specific niche, not generic tech news
+
+Return ONLY valid JSON. No explanation."""
+
+
+async def suggest_scout_sources(company_context: str, existing_sources: dict | None = None, api_key: str | None = None) -> dict:
+    """Use Claude to suggest scout sources based on company context.
+
+    Returns dict with keys matching SOURCE_TYPES settings keys, each an array of suggestions.
+    """
+    api_key = api_key or settings.anthropic_api_key
+    client = anthropic.Anthropic(api_key=api_key)
+
+    user_msg = f"COMPANY PROFILE:\n{company_context}"
+
+    if existing_sources:
+        already = []
+        for key, vals in existing_sources.items():
+            if vals:
+                already.append(f"  {key}: {', '.join(vals)}")
+        if already:
+            user_msg += f"\n\nALREADY CONFIGURED (suggest NEW ones, not duplicates):\n" + "\n".join(already)
+
+    try:
+        response = client.messages.create(
+            model=settings.claude_model_fast,
+            max_tokens=1500,
+            system=SUGGEST_PROMPT,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+
+        text = response.content[0].text.strip()
+
+        # Extract JSON from response
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+
+        suggestions = json.loads(text)
+
+        # Filter out any that are already configured
+        if existing_sources:
+            for key in suggestions:
+                if key in existing_sources and isinstance(suggestions[key], list):
+                    existing_set = {v.lower().strip() for v in existing_sources.get(key, [])}
+                    suggestions[key] = [v for v in suggestions[key] if v.lower().strip() not in existing_set]
+
+        return suggestions
+
+    except Exception as e:
+        log.error("Source suggestion failed: %s", e)
+        return {"error": str(e)}

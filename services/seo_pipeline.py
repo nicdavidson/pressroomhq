@@ -554,6 +554,292 @@ Automated analysis identified {len(all_changes)} improvements across {len([t for
 
 
 # ──────────────────────────────────────
+# Deploy Verification & Self-Healing
+# ──────────────────────────────────────
+
+HEAL_SYSTEM_PROMPT = """You are a build-fix specialist. A Netlify deploy failed after automated SEO changes were pushed to a repo.
+
+You will receive:
+1. The build log showing the error
+2. The list of SEO changes that were made
+
+Your task: produce the exact file edits needed to fix the build, as a JSON array.
+
+Rules:
+- Fix the BUILD error, not the SEO intent. If a change broke the build, revert or adjust it.
+- Common issues: broken front-matter YAML, invalid markdown syntax, missing closing tags, broken links.
+- Keep the SEO improvements intact where possible — only modify what's breaking the build.
+- Output ONLY a JSON array of edits: [{"file_path": "...", "search": "...", "replace": "..."}]
+- If you can't determine the fix, return an empty array: []"""
+
+
+async def verify_deploy(repo_slug: str, branch_name: str, max_wait: int = 300, poll_interval: int = 15) -> dict:
+    """Poll GitHub Checks API for deploy status on a branch.
+
+    Returns: {"status": "success"|"failed"|"timeout"|"no_checks", "log_url": "...", "details": "..."}
+    """
+    import asyncio
+    import time
+
+    token = settings.github_token
+    if not token:
+        return {"status": "no_checks", "details": "No GitHub token configured"}
+
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    start = time.time()
+    last_status = None
+
+    while (time.time() - start) < max_wait:
+        try:
+            # Get the latest commit SHA on the branch
+            result = subprocess.run(
+                ["gh", "api", f"repos/{repo_slug}/commits/{branch_name}", "--jq", ".sha"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode != 0:
+                log.warning("Could not get branch SHA: %s", result.stderr)
+                return {"status": "no_checks", "details": f"Cannot read branch: {result.stderr[:200]}"}
+
+            sha = result.stdout.strip()
+            if not sha:
+                return {"status": "no_checks", "details": "Empty SHA returned"}
+
+            # Get check runs for this commit
+            check_result = subprocess.run(
+                ["gh", "api", f"repos/{repo_slug}/commits/{sha}/check-runs"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if check_result.returncode != 0:
+                await asyncio.sleep(poll_interval)
+                continue
+
+            data = json.loads(check_result.stdout)
+            check_runs = data.get("check_runs", [])
+
+            # Look for Netlify or any deploy-related check
+            deploy_check = None
+            for cr in check_runs:
+                name = (cr.get("name") or "").lower()
+                app = (cr.get("app", {}).get("slug") or "").lower()
+                if any(kw in name or kw in app for kw in ["netlify", "deploy", "build", "vercel", "cloudflare"]):
+                    deploy_check = cr
+                    break
+
+            if not deploy_check:
+                # Also check commit statuses (some services use status API instead of checks)
+                status_result = subprocess.run(
+                    ["gh", "api", f"repos/{repo_slug}/commits/{sha}/statuses"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if status_result.returncode == 0:
+                    statuses = json.loads(status_result.stdout)
+                    for st in statuses:
+                        ctx = (st.get("context") or "").lower()
+                        if any(kw in ctx for kw in ["netlify", "deploy", "build"]):
+                            state = st.get("state", "")
+                            if state == "success":
+                                return {"status": "success", "details": f"Deploy passed via status: {st.get('context')}", "log_url": st.get("target_url", "")}
+                            elif state in ("failure", "error"):
+                                return {"status": "failed", "details": st.get("description", "Deploy failed"), "log_url": st.get("target_url", "")}
+                            # pending — keep polling
+                            last_status = state
+                            break
+
+                if not last_status:
+                    # No deploy checks found yet — might still be queueing
+                    elapsed = time.time() - start
+                    if elapsed > 60:
+                        # After 60s with no checks, likely no CI configured
+                        return {"status": "no_checks", "details": "No deploy checks found after 60s"}
+
+                await asyncio.sleep(poll_interval)
+                continue
+
+            # We have a deploy check
+            check_status = deploy_check.get("status")  # queued, in_progress, completed
+            conclusion = deploy_check.get("conclusion")  # success, failure, etc.
+
+            if check_status == "completed":
+                log_url = deploy_check.get("details_url") or deploy_check.get("html_url", "")
+                if conclusion == "success":
+                    return {"status": "success", "details": "Deploy succeeded", "log_url": log_url}
+                else:
+                    output = deploy_check.get("output", {})
+                    summary = output.get("summary", "") or output.get("text", "") or ""
+                    return {
+                        "status": "failed",
+                        "details": summary[:2000] or f"Deploy failed: {conclusion}",
+                        "log_url": log_url,
+                        "conclusion": conclusion,
+                    }
+
+            # Still running — keep polling
+            last_status = check_status
+
+        except Exception as e:
+            log.warning("Deploy check poll error: %s", e)
+
+        await asyncio.sleep(poll_interval)
+
+    return {"status": "timeout", "details": f"Deploy verification timed out after {max_wait}s"}
+
+
+async def fetch_deploy_log(log_url: str) -> str:
+    """Fetch build log from Netlify deploy URL. Returns log text."""
+    if not log_url:
+        return ""
+
+    try:
+        import httpx
+        # Netlify deploy URLs look like: https://app.netlify.com/sites/SITE/deploys/DEPLOY_ID
+        # The API equivalent: https://api.netlify.com/api/v1/deploys/DEPLOY_ID
+        # But we can also just fetch the page and look for error info
+
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(log_url)
+            if resp.status_code == 200:
+                text = resp.text
+                # Extract useful error info — look for common patterns
+                # For now, return a truncated version
+                return text[:5000]
+    except Exception as e:
+        log.warning("Failed to fetch deploy log from %s: %s", log_url, e)
+
+    return ""
+
+
+async def diagnose_and_fix_build(
+    build_log: str,
+    deploy_details: str,
+    plan: dict,
+    repo_path: str,
+    api_key: str,
+) -> list[dict]:
+    """Send build failure + our changes to Claude, get fix edits."""
+    # Collect what we changed
+    change_summary = []
+    for tier in plan.get("tiers", []):
+        for change in tier.get("changes", []):
+            change_summary.append(
+                f"- {change.get('change_type', 'update')} on {change.get('file_path', '?')}: "
+                f"'{change.get('current_value', '')[:80]}' → '{change.get('suggested_value', '')[:80]}'"
+            )
+
+    # Read the current state of changed files
+    file_contents = []
+    seen_files = set()
+    for tier in plan.get("tiers", []):
+        for change in tier.get("changes", []):
+            fp = change.get("file_path", "")
+            if fp and fp not in seen_files:
+                seen_files.add(fp)
+                full_path = Path(repo_path) / fp
+                if full_path.exists():
+                    try:
+                        content = full_path.read_text(encoding="utf-8")
+                        if len(content) > 8000:
+                            content = content[:8000] + "\n... (truncated)"
+                        file_contents.append(f"\n--- {fp} ---\n{content}\n--- end {fp} ---")
+                    except Exception:
+                        pass
+
+    user_message = f"""BUILD FAILED after SEO changes were pushed.
+
+## Deploy Error
+{deploy_details[:3000]}
+
+## Build Log (excerpt)
+{build_log[:3000]}
+
+## Changes We Made
+{chr(10).join(change_summary) if change_summary else '(no change details available)'}
+
+## Current File Contents (after our changes)
+{''.join(file_contents) if file_contents else '(no file contents available)'}
+
+Fix the build error. Return JSON edits to repair the files."""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=settings.claude_model,
+            max_tokens=6000,
+            system=HEAL_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+        )
+
+        raw_text = response.content[0].text
+        edits = _extract_edits(raw_text)
+        return edits
+
+    except Exception as e:
+        log.error("Build diagnosis failed: %s", e)
+        return []
+
+
+async def heal_build(
+    repo_path: str,
+    repo_url: str,
+    branch_name: str,
+    plan: dict,
+    deploy_result: dict,
+    api_key: str,
+) -> dict:
+    """Full self-healing cycle: fetch log → diagnose → fix → push.
+
+    Returns: {"healed": bool, "edits_applied": int, "error": str}
+    """
+    # 1. Fetch build log
+    log_url = deploy_result.get("log_url", "")
+    build_log = await fetch_deploy_log(log_url) if log_url else ""
+    deploy_details = deploy_result.get("details", "Build failed")
+
+    # 2. Diagnose and get fix edits
+    edits = await diagnose_and_fix_build(build_log, deploy_details, plan, repo_path, api_key)
+
+    if not edits:
+        return {"healed": False, "edits_applied": 0, "error": "Could not determine fix from build log"}
+
+    # 3. Apply edits
+    applied = 0
+    errors = []
+    for edit in edits:
+        try:
+            _apply_edit(repo_path, edit)
+            applied += 1
+        except Exception as e:
+            errors.append(f"{edit.get('file_path', '?')}: {str(e)}")
+
+    if applied == 0:
+        return {"healed": False, "edits_applied": 0, "error": f"No edits could be applied: {'; '.join(errors)}"}
+
+    # 4. Commit and push the fix
+    def _git(cmd):
+        return subprocess.run(
+            ["git"] + cmd,
+            capture_output=True, text=True, cwd=repo_path, timeout=60,
+        )
+
+    _git(["add", "-A"])
+    commit_msg = f"[SEO fix] Build repair: {applied} edit{'s' if applied != 1 else ''}"
+    commit_result = _git(["commit", "-m", commit_msg])
+
+    if commit_result.returncode != 0:
+        return {"healed": False, "edits_applied": applied, "error": f"Commit failed: {commit_result.stderr[:200]}"}
+
+    push_result = _git(["push", "origin", branch_name])
+    if push_result.returncode != 0:
+        return {"healed": False, "edits_applied": applied, "error": f"Push failed: {push_result.stderr[:200]}"}
+
+    log.info("[SEO HEAL] Pushed %d fix edits to %s", applied, branch_name)
+    return {"healed": True, "edits_applied": applied, "error": ""}
+
+
+# ──────────────────────────────────────
 # Main Pipeline
 # ──────────────────────────────────────
 
@@ -564,6 +850,7 @@ async def run_seo_pipeline(org_id: int, config: dict, api_key: str, update_fn=No
     3. Clone the target repo
     4. Implement changes via Claude API
     5. Create branch, commit tier-by-tier, push, create PR
+    6. Verify deploy (poll GitHub Checks API) — if deploy fails, self-heal
 
     config keys: domain, repo_url, base_branch, run_id, company_description
     update_fn: async callable(updates_dict) to update the run record in real-time
@@ -676,21 +963,126 @@ async def run_seo_pipeline(org_id: int, config: dict, api_key: str, update_fn=No
         if pr_result.get("error") and not pr_result.get("pr_url"):
             result["status"] = "failed"
             result["error"] = pr_result["error"]
-        else:
-            result["status"] = "complete"
-            if pr_result.get("error"):
-                result["error"] = pr_result["error"]
+            await _update({
+                "status": "failed",
+                "pr_url": result["pr_url"],
+                "branch_name": result["branch_name"],
+                "changes_made": result["changes_made"],
+                "error": result["error"],
+                "completed_at": datetime.datetime.utcnow(),
+                "plan_json": json.dumps(plan),
+            })
+            return result
 
         await _update({
-            "status": result["status"],
+            "status": "verifying",
             "pr_url": result["pr_url"],
             "branch_name": result["branch_name"],
             "changes_made": result["changes_made"],
-            "error": result["error"],
-            "completed_at": datetime.datetime.utcnow(),
+            "deploy_status": "pending",
             "plan_json": json.dumps(plan),
         })
 
+        # ── Phase 6: Verify Deploy & Self-Heal ──
+        log.info("[SEO PR] Verifying deploy for %s...", branch_name)
+
+        repo_slug = repo_url.replace("https://github.com/", "").replace(".git", "")
+        deploy_result = await verify_deploy(repo_slug, branch_name, max_wait=300)
+        deploy_status = deploy_result.get("status", "no_checks")
+
+        if deploy_status == "success":
+            log.info("[SEO PR] Deploy verified — build passed")
+            result["status"] = "complete"
+            await _update({
+                "status": "complete",
+                "deploy_status": "success",
+                "completed_at": datetime.datetime.utcnow(),
+            })
+            return result
+
+        if deploy_status in ("no_checks", "timeout"):
+            # No CI to verify — mark complete, note the situation
+            log.info("[SEO PR] No deploy checks found or timed out — completing without verification")
+            result["status"] = "complete"
+            result["error"] = pr_result.get("error", "")
+            await _update({
+                "status": "complete",
+                "deploy_status": deploy_status,
+                "deploy_log": deploy_result.get("details", ""),
+                "completed_at": datetime.datetime.utcnow(),
+            })
+            return result
+
+        # Deploy FAILED — attempt self-healing
+        log.warning("[SEO PR] Deploy failed: %s", deploy_result.get("details", "")[:200])
+        await _update({
+            "status": "healing",
+            "deploy_status": "failed",
+            "deploy_log": deploy_result.get("details", "")[:2000],
+        })
+
+        max_heal_attempts = 2
+        for attempt in range(1, max_heal_attempts + 1):
+            log.info("[SEO PR] Heal attempt %d/%d...", attempt, max_heal_attempts)
+            await _update({"heal_attempts": attempt})
+
+            heal_result = await heal_build(
+                repo_path, repo_url, branch_name, plan, deploy_result, api_key,
+            )
+
+            if not heal_result.get("healed"):
+                log.warning("[SEO PR] Heal attempt %d failed: %s", attempt, heal_result.get("error"))
+                if attempt == max_heal_attempts:
+                    result["status"] = "complete"
+                    result["error"] = f"Deploy failed, heal failed: {heal_result.get('error', '')}"
+                    await _update({
+                        "status": "complete",
+                        "deploy_status": "failed",
+                        "error": result["error"],
+                        "completed_at": datetime.datetime.utcnow(),
+                    })
+                    return result
+                continue
+
+            # Fix pushed — verify again
+            log.info("[SEO PR] Fix pushed, re-verifying deploy...")
+            await _update({"status": "verifying", "deploy_status": "pending"})
+
+            deploy_result = await verify_deploy(repo_slug, branch_name, max_wait=300)
+            deploy_status = deploy_result.get("status", "no_checks")
+
+            if deploy_status == "success":
+                log.info("[SEO PR] Deploy healed on attempt %d!", attempt)
+                result["status"] = "complete"
+                await _update({
+                    "status": "complete",
+                    "deploy_status": "healed",
+                    "completed_at": datetime.datetime.utcnow(),
+                })
+                return result
+
+            if deploy_status in ("no_checks", "timeout"):
+                result["status"] = "complete"
+                await _update({
+                    "status": "complete",
+                    "deploy_status": "healed",
+                    "deploy_log": deploy_result.get("details", ""),
+                    "completed_at": datetime.datetime.utcnow(),
+                })
+                return result
+
+            # Still failing — loop for next attempt
+            log.warning("[SEO PR] Deploy still failing after heal attempt %d", attempt)
+
+        # Exhausted heal attempts
+        result["status"] = "complete"
+        result["error"] = "Deploy failed after all heal attempts"
+        await _update({
+            "status": "complete",
+            "deploy_status": "failed",
+            "error": result["error"],
+            "completed_at": datetime.datetime.utcnow(),
+        })
         return result
 
     except Exception as e:
@@ -706,6 +1098,184 @@ async def run_seo_pipeline(org_id: int, config: dict, api_key: str, update_fn=No
 
     finally:
         # Cleanup temp repo
+        if repo_path and os.path.exists(repo_path):
+            try:
+                shutil.rmtree(repo_path)
+            except Exception:
+                pass
+
+
+# ──────────────────────────────────────
+# README Fix Pipeline
+# ──────────────────────────────────────
+
+README_FIX_PROMPT = """You are a developer relations expert improving a GitHub README.
+
+You will receive:
+1. The current README content
+2. An audit analysis with specific recommendations
+
+Your job: produce an IMPROVED version of the full README that addresses the audit recommendations.
+
+Rules:
+- Keep all existing content that is good — don't remove things that work
+- Add missing sections identified in the audit (installation, usage, examples, contributing, etc.)
+- Improve existing sections that were called out as weak
+- Add code examples where the audit recommends them
+- Keep the voice and tone consistent with the existing README
+- Use proper markdown formatting
+- If the README is very short, expand it significantly
+- If the README is already decent, make targeted improvements
+
+Return ONLY the full improved README content. No explanation, no wrapping — just the raw markdown."""
+
+
+async def fix_readme_with_pr(
+    repo_url: str,
+    base_branch: str,
+    audit_recommendations: str,
+    current_readme: str | None = None,
+    api_key: str | None = None,
+) -> dict:
+    """Clone a repo, improve the README based on audit recommendations, create a PR.
+
+    Returns dict with: pr_url, branch_name, error (if any).
+    """
+    api_key = api_key or settings.anthropic_api_key
+    repo_path = None
+
+    try:
+        # Phase 1: Clone
+        log.info("[README PR] Cloning %s", repo_url)
+        repo_path = clone_repo(repo_url, base_branch)
+
+        # Phase 2: Read current README
+        readme_path = None
+        for name in ["README.md", "readme.md", "README.rst", "README", "README.txt"]:
+            candidate = Path(repo_path) / name
+            if candidate.exists():
+                readme_path = candidate
+                break
+
+        if not readme_path:
+            return {"error": "No README found in repo", "pr_url": ""}
+
+        current_content = readme_path.read_text(encoding="utf-8")
+        if current_readme is None:
+            current_readme = current_content
+
+        # Phase 3: Claude generates improved README
+        log.info("[README PR] Generating improved README via Claude")
+        client = anthropic.Anthropic(api_key=api_key)
+
+        user_msg = f"""CURRENT README ({readme_path.name}):
+```
+{current_readme[:12000]}
+```
+
+AUDIT RECOMMENDATIONS:
+{audit_recommendations[:4000]}"""
+
+        response = client.messages.create(
+            model=settings.claude_model,
+            max_tokens=8000,
+            system=README_FIX_PROMPT,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+
+        improved = response.content[0].text.strip()
+
+        # Strip markdown code fences if Claude wrapped the output
+        if improved.startswith("```") and improved.endswith("```"):
+            lines = improved.split("\n")
+            improved = "\n".join(lines[1:-1])
+
+        if not improved or len(improved) < 50:
+            return {"error": "Claude returned empty or too-short README", "pr_url": ""}
+
+        # Phase 4: Write improved README
+        readme_path.write_text(improved, encoding="utf-8")
+
+        # Phase 5: Branch, commit, push, PR
+        def _git(cmd):
+            return subprocess.run(
+                ["git"] + cmd,
+                capture_output=True, text=True, cwd=repo_path, timeout=60,
+            )
+
+        date_str = datetime.date.today().strftime("%Y-%m-%d")
+        repo_slug = repo_url.replace("https://github.com/", "").replace(".git", "")
+        branch_name = f"readme-improve/{date_str}"
+
+        _git(["checkout", "-b", branch_name])
+        _git(["add", readme_path.name])
+
+        commit_msg = f"[README] Improve documentation based on audit recommendations"
+        commit_result = _git(["commit", "-m", commit_msg])
+        if commit_result.returncode != 0:
+            return {"error": "Nothing to commit — README unchanged", "pr_url": ""}
+
+        push_result = _git(["push", "origin", branch_name])
+        if push_result.returncode != 0:
+            return {"error": f"Push failed: {push_result.stderr}", "pr_url": ""}
+
+        # Create PR
+        pr_title = f"[README] Improve documentation ({date_str})"
+        pr_body = f"""## README Improvements
+
+Automated improvements based on README audit recommendations.
+
+### Changes
+- Addressed missing sections and structural issues
+- Improved code examples and documentation clarity
+- Enhanced overall README quality
+
+### Audit Summary
+{audit_recommendations[:1500]}
+
+---
+*Generated by Pressroom SEO pipeline*"""
+
+        pr_result = subprocess.run(
+            [
+                "gh", "pr", "create",
+                "--repo", repo_slug,
+                "--title", pr_title,
+                "--body", pr_body,
+                "--base", base_branch,
+                "--head", branch_name,
+            ],
+            capture_output=True, text=True, cwd=repo_path, timeout=60,
+        )
+
+        if pr_result.returncode != 0 and "label" in pr_result.stderr.lower():
+            pr_result = subprocess.run(
+                [
+                    "gh", "pr", "create",
+                    "--repo", repo_slug,
+                    "--title", pr_title,
+                    "--body", pr_body,
+                    "--base", base_branch,
+                    "--head", branch_name,
+                ],
+                capture_output=True, text=True, cwd=repo_path, timeout=60,
+            )
+
+        pr_url = pr_result.stdout.strip() if pr_result.returncode == 0 else ""
+        error = pr_result.stderr.strip() if pr_result.returncode != 0 else ""
+
+        log.info("[README PR] Done — pr_url=%s error=%s", pr_url, error)
+        return {
+            "pr_url": pr_url,
+            "branch_name": branch_name,
+            "error": error,
+        }
+
+    except Exception as e:
+        log.error("[README PR] Failed: %s", e, exc_info=True)
+        return {"error": str(e), "pr_url": ""}
+
+    finally:
         if repo_path and os.path.exists(repo_path):
             try:
                 shutil.rmtree(repo_path)

@@ -32,13 +32,53 @@ export default function Connections({ onLog, orgId }) {
   })
   const [testing, setTesting] = useState(null)
 
-  // Load OAuth status + data sources
+  // HubSpot connection state
+  const [hubStatus, setHubStatus] = useState({})
+  const [hubKey, setHubKey] = useState('')
+  const [hubConnecting, setHubConnecting] = useState(false)
+
+  // Load OAuth status + data sources + HubSpot
   useEffect(() => {
     if (!orgId) return
     fetch(`${API}/oauth/status`, { headers: orgHeaders(orgId) })
       .then(r => r.json()).then(setOauthStatus).catch(() => {})
+    fetch(`${API}/hubspot/status`, { headers: orgHeaders(orgId) })
+      .then(r => r.json()).then(setHubStatus).catch(() => setHubStatus({ connected: false }))
     loadDataSources()
   }, [orgId])
+
+  async function connectHubSpot() {
+    if (!hubKey.trim()) return
+    setHubConnecting(true)
+    try {
+      const res = await fetch(`${API}/hubspot/connect`, {
+        method: 'POST', headers: orgHeaders(orgId),
+        body: JSON.stringify({ api_key: hubKey }),
+      })
+      const data = await res.json()
+      if (data.connected) {
+        onLog?.('HUBSPOT CONNECTED', 'success')
+        setHubStatus(data)
+        setHubKey('')
+      } else {
+        onLog?.(`HUBSPOT CONNECT FAILED — ${data.error || 'unknown'}`, 'error')
+      }
+    } catch (e) {
+      onLog?.(`HUBSPOT CONNECT FAILED — ${e.message}`, 'error')
+    } finally {
+      setHubConnecting(false)
+    }
+  }
+
+  async function disconnectHubSpot() {
+    try {
+      await fetch(`${API}/hubspot/disconnect`, { method: 'DELETE', headers: orgHeaders(orgId) })
+      onLog?.('HUBSPOT DISCONNECTED', 'warn')
+      setHubStatus({ connected: false })
+    } catch (e) {
+      onLog?.(`DISCONNECT FAILED — ${e.message}`, 'error')
+    }
+  }
 
   // Check for OAuth callback in URL
   useEffect(() => {
@@ -201,6 +241,43 @@ export default function Connections({ onLog, orgId }) {
                 {facebook.connected ? 'Reconnect' : 'Connect Facebook'}
               </button>
             )}
+          </div>
+
+          {/* HubSpot */}
+          <div className={`connection-card ${hubStatus.connected ? 'connected' : ''}`}>
+            <div className="connection-card-header">
+              <span className="connection-name">HubSpot</span>
+              <span className={`connection-status ${hubStatus.connected ? 'active' : 'inactive'}`}>
+                {hubStatus.connected ? 'CONNECTED' : 'NOT CONNECTED'}
+              </span>
+            </div>
+            {hubStatus.connected && hubStatus.hub_domain && (
+              <div className="connection-detail">{hubStatus.hub_domain}</div>
+            )}
+            {hubStatus.connected && hubStatus.portal_id && (
+              <div className="connection-detail dim">Portal ID: {hubStatus.portal_id}</div>
+            )}
+            {!hubStatus.connected && (
+              <div className="form-row" style={{ marginTop: 8 }}>
+                <input
+                  type="password"
+                  value={hubKey}
+                  onChange={e => setHubKey(e.target.value)}
+                  placeholder="pat-na1-xxxxxxxx"
+                  onKeyDown={e => { if (e.key === 'Enter') connectHubSpot() }}
+                />
+              </div>
+            )}
+            <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+              {!hubStatus.connected && (
+                <button className="btn btn-sm" onClick={connectHubSpot} disabled={hubConnecting || !hubKey.trim()}>
+                  {hubConnecting ? 'Connecting...' : 'Connect'}
+                </button>
+              )}
+              {hubStatus.connected && (
+                <button className="btn btn-sm btn-danger" onClick={disconnectHubSpot}>Disconnect</button>
+              )}
+            </div>
           </div>
         </div>
       </div>

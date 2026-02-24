@@ -27,7 +27,9 @@ DEFAULTS = {
     "scout_hn_keywords": '["DreamFactory", "REST API", "API gateway"]',
     "scout_subreddits": '["selfhosted", "webdev"]',
     "scout_rss_feeds": '[]',
+    "scout_web_queries": '[]',
     # Voice profile — core
+    "golden_anchor": "",
     "voice_persona": "",
     "voice_audience": "",
     "voice_tone": "",
@@ -64,11 +66,17 @@ DEFAULTS = {
     "anthropic_api_key_id": "",
     # Onboarding metadata
     "onboard_company_name": "",
+    "onboard_company_description": "",
+    "onboard_domain": "",
     "onboard_industry": "",
     "onboard_topics": "[]",
     "onboard_competitors": "[]",
     "onboard_complete": "",
     "df_service_map": "",
+    # Slack notifications
+    "slack_webhook_url": "",
+    "slack_notify_on_generate": "",
+    "slack_channel_name": "",
 }
 
 # Account-level keys — shared across all companies, saved with org_id=NULL
@@ -86,6 +94,7 @@ SENSITIVE_KEYS = {
     "anthropic_api_key", "github_token", "df_api_key", "github_webhook_secret",
     "linkedin_client_secret", "facebook_app_secret",
     "linkedin_access_token", "facebook_page_token",
+    "slack_webhook_url",
 }
 
 

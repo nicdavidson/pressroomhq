@@ -5,6 +5,7 @@ Instead of generating from all signals blindly, the editor builds a focused
 story and generates content from that curated context.
 """
 
+import json
 import logging
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -43,6 +44,7 @@ class UpdateSignalNotesRequest(BaseModel):
 
 class GenerateRequest(BaseModel):
     channels: list[str] = []  # which channels to generate — empty = all enabled
+    team_member_id: int | None = None  # write as this team member (None = company voice)
 
 
 # ── CRUD ──
@@ -145,7 +147,11 @@ async def generate_from_story(story_id: int, req: GenerateRequest,
 
     try:
         api_key = await dl.resolve_api_key()
-        results = await engine_generate(story, dl, channels=req.channels or None, api_key=api_key)
+        team_member = None
+        if req.team_member_id:
+            members = await dl.list_team_members()
+            team_member = next((m for m in members if m["id"] == req.team_member_id), None)
+        results = await engine_generate(story, dl, channels=req.channels or None, api_key=api_key, team_member=team_member)
         await dl.update_story(story_id, status="complete")
         await dl.commit()
         return {"story_id": story_id, "generated": len(results), "content": results}
@@ -154,3 +160,145 @@ async def generate_from_story(story_id: int, req: GenerateRequest,
         await dl.update_story(story_id, status="draft")
         await dl.commit()
         return {"error": str(e)}
+
+
+# ── Signal Discovery ──
+
+class DiscoverRequest(BaseModel):
+    mode: str = "web"  # "web" = search the web, "wire" = search existing signals
+
+
+@router.post("/{story_id}/discover")
+async def discover_signals(story_id: int, req: DiscoverRequest,
+                            dl: DataLayer = Depends(get_data_layer)):
+    """Find new signals related to a story's angle.
+
+    mode="web": Uses Claude web search to find fresh external signals.
+    mode="wire": Uses Claude to rank existing signals by relevance to the story.
+    """
+    story = await dl.get_story(story_id)
+    if not story:
+        return {"error": "Story not found"}
+
+    api_key = await dl.resolve_api_key()
+    if not api_key:
+        return {"error": "No Anthropic API key configured."}
+
+    # Build story context from title + angle + editorial notes + attached signal titles
+    story_signals = story.get("signals", [])
+    signal_titles = [ss.get("signal", {}).get("title", "") for ss in story_signals if ss.get("signal")]
+    context = f"Story: {story['title']}"
+    if story.get("angle"):
+        context += f"\nAngle: {story['angle']}"
+    if story.get("editorial_notes"):
+        context += f"\nNotes: {story['editorial_notes']}"
+    if signal_titles:
+        context += f"\nExisting signals: {'; '.join(signal_titles[:5])}"
+
+    if req.mode == "wire":
+        return await _discover_from_wire(context, story_id, story_signals, dl, api_key)
+    else:
+        return await _discover_from_web(context, story_id, dl, api_key)
+
+
+async def _discover_from_wire(context: str, story_id: int, story_signals: list,
+                               dl: DataLayer, api_key: str) -> dict:
+    """Rank existing signals by relevance to the story."""
+    import anthropic
+
+    all_signals = await dl.list_signals(limit=50)
+    # Exclude signals already in the story
+    attached_ids = {ss.get("signal", {}).get("id") or ss.get("signal_id") for ss in story_signals}
+    candidates = [s for s in all_signals if s["id"] not in attached_ids]
+
+    if not candidates:
+        return {"mode": "wire", "signals": [], "message": "No unattached signals in the wire."}
+
+    # Build a compact signal list for Claude
+    signal_list = "\n".join(
+        f"[{s['id']}] ({s.get('type', '')}) {s.get('title', '')} — {(s.get('body', '') or '')[:100]}"
+        for s in candidates[:30]
+    )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    from config import settings as cfg
+    response = client.messages.create(
+        model=cfg.claude_model_fast,
+        max_tokens=500,
+        system="You are a content strategist. Return ONLY a JSON array of signal IDs, most relevant first. No commentary.",
+        messages=[{"role": "user", "content": (
+            f"Given this story context:\n{context}\n\n"
+            f"Which of these signals are most relevant? Return the top 8 most relevant IDs as a JSON array.\n\n"
+            f"{signal_list}"
+        )}],
+    )
+
+    text = response.content[0].text.strip()
+    # Parse the JSON array of IDs
+    try:
+        text = text.strip("`").removeprefix("json").strip()
+        ranked_ids = json.loads(text)
+        if not isinstance(ranked_ids, list):
+            ranked_ids = []
+    except (json.JSONDecodeError, ValueError):
+        # Try extracting numbers
+        import re
+        ranked_ids = [int(x) for x in re.findall(r'\d+', text)]
+
+    # Build ranked signal list
+    signal_map = {s["id"]: s for s in candidates}
+    ranked = [signal_map[sid] for sid in ranked_ids if sid in signal_map]
+
+    return {"mode": "wire", "signals": ranked[:8]}
+
+
+async def _discover_from_web(context: str, story_id: int,
+                              dl: DataLayer, api_key: str) -> dict:
+    """Search the web for new signals related to the story."""
+    from services.scout import scout_web_search
+
+    # Generate 2-3 targeted search queries from the story context
+    import anthropic
+    from config import settings as cfg
+    client = anthropic.Anthropic(api_key=api_key)
+
+    response = client.messages.create(
+        model=cfg.claude_model_fast,
+        max_tokens=300,
+        system="Return ONLY a JSON array of 3 search query strings. No commentary.",
+        messages=[{"role": "user", "content": (
+            f"Generate 3 specific web search queries to find fresh news, data, and developments "
+            f"related to this editorial story:\n\n{context}\n\n"
+            f"Make queries specific enough to find real articles, not generic. "
+            f"Include current year 2026 where relevant."
+        )}],
+    )
+
+    text = response.content[0].text.strip().strip("`").removeprefix("json").strip()
+    try:
+        queries = json.loads(text)
+        if not isinstance(queries, list):
+            queries = []
+    except (json.JSONDecodeError, ValueError):
+        queries = [story.get("title", "")]
+
+    # Run web search with those queries
+    signals = await scout_web_search(queries[:3], company_context=context, api_key=api_key)
+
+    # Save discovered signals to the wire
+    saved = []
+    for s in signals:
+        url = s.get("url", "")
+        if url and await dl.signal_exists(url):
+            continue
+        result = await dl.save_signal(s)
+        saved.append(result)
+    await dl.commit()
+
+    return {
+        "mode": "web",
+        "queries": queries[:3],
+        "signals_found": len(signals),
+        "signals_saved": len(saved),
+        "signals": saved,
+    }

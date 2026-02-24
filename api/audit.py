@@ -1,6 +1,6 @@
 """Audit endpoints — SEO site audits and GitHub README audits, with persistence."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from pydantic import BaseModel
 
 from database import get_data_layer
@@ -18,6 +18,13 @@ class AuditRequest(BaseModel):
 
 class ReadmeAuditRequest(BaseModel):
     repo: str = ""  # owner/repo or full GitHub URL
+
+
+class ReadmeFixRequest(BaseModel):
+    repo_url: str          # full GitHub URL for cloning
+    base_branch: str = "main"
+    audit_id: int | None = None   # optional — loads recommendations from saved audit
+    recommendations: str = ""     # or pass recommendations directly
 
 
 @router.post("/seo")
@@ -106,3 +113,36 @@ async def delete_audit(audit_id: int, dl: DataLayer = Depends(get_data_layer)):
     if not deleted:
         return {"error": "Audit not found"}
     return {"deleted": audit_id}
+
+
+@router.post("/readme/fix")
+async def fix_readme_with_pr(req: ReadmeFixRequest, dl: DataLayer = Depends(get_data_layer)):
+    """Improve a repo's README based on audit recommendations and create a PR."""
+    from services.seo_pipeline import fix_readme_with_pr as _fix
+
+    if not req.repo_url:
+        return {"error": "repo_url is required."}
+
+    api_key = await dl.resolve_api_key()
+    if not api_key:
+        return {"error": "No Anthropic API key configured. Add one in Account settings."}
+
+    # Get recommendations — from audit_id or directly
+    recommendations = req.recommendations
+    if not recommendations and req.audit_id:
+        audit = await dl.get_audit(req.audit_id)
+        if audit and audit.get("result"):
+            recs = audit["result"].get("recommendations", {})
+            recommendations = recs.get("analysis", "")
+
+    if not recommendations:
+        return {"error": "No recommendations provided. Run a README audit first."}
+
+    result = await _fix(
+        repo_url=req.repo_url,
+        base_branch=req.base_branch,
+        audit_recommendations=recommendations,
+        api_key=api_key,
+    )
+
+    return result

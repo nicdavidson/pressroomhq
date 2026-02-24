@@ -1,6 +1,7 @@
 """Pipeline endpoints — trigger scout, generate, regenerate, and full runs."""
 
 import datetime
+import json
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -8,11 +9,16 @@ from pydantic import BaseModel
 from database import get_data_layer
 from models import ContentChannel
 from services.data_layer import DataLayer
-from services.scout import run_full_scout, filter_signals_for_relevance
+from services.scout import run_full_scout, filter_signals_for_relevance, scout_visibility_check, suggest_scout_sources
 from services.engine import generate_brief, generate_all_content, regenerate_single
 from services.humanizer import humanize
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
+
+
+class GenerateRequest(BaseModel):
+    channels: list[str] = []
+    team_member_id: int | None = None
 
 
 def _build_company_context(voice: dict) -> str:
@@ -44,11 +50,14 @@ async def trigger_scout(since_hours: int = 24, dl: DataLayer = Depends(get_data_
     """Run the scout — pull signals from all sources."""
     api_key = await dl.resolve_api_key()
     org_settings = await dl.get_all_settings()
-    raw_signals = await run_full_scout(since_hours, org_settings=org_settings)
-
-    # Relevance filter — discard off-topic noise
     voice = await dl.get_voice_settings()
     company_ctx = _build_company_context(voice)
+    raw_signals = await run_full_scout(
+        since_hours, org_settings=org_settings,
+        api_key=api_key, company_context=company_ctx,
+    )
+
+    # Relevance filter — discard off-topic noise
     signals = await filter_signals_for_relevance(raw_signals, company_ctx, api_key=api_key)
 
     # Prune signals older than 7 days
@@ -78,10 +87,15 @@ async def trigger_scout(since_hours: int = 24, dl: DataLayer = Depends(get_data_
 
 @router.post("/generate")
 async def trigger_generate(
-    channels: list[str] | None = None,
+    req: GenerateRequest = GenerateRequest(),
     dl: DataLayer = Depends(get_data_layer),
 ):
     """Generate content from today's signals. Runs brief → content → humanizer."""
+    channels = req.channels or None
+    team_member = None
+    if req.team_member_id:
+        members = await dl.list_team_members()
+        team_member = next((m for m in members if m["id"] == req.team_member_id), None)
     signal_dicts = await dl.list_signals(limit=20)
 
     if not signal_dicts:
@@ -115,9 +129,10 @@ async def trigger_generate(
     content_items = await generate_all_content(
         brief_data, signal_dicts, target_channels,
         memory=memory, voice_settings=voice, assets=assets,
-        api_key=api_key,
+        api_key=api_key, team_member=team_member,
     )
 
+    author = f"team:{team_member['id']}" if team_member else "company"
     saved_content = []
     for item in content_items:
         raw_body = item["body"]
@@ -130,7 +145,7 @@ async def trigger_generate(
             "headline": item["headline"],
             "body": clean_body,
             "body_raw": raw_body,
-            "author": "company",
+            "author": author,
             "source_signal_ids": item.get("source_signal_ids", ""),
         })
         saved_content.append(result)
@@ -194,15 +209,23 @@ async def regenerate_content(content_id: int, req: RegenerateRequest,
 
 
 @router.post("/run")
-async def full_run(since_hours: int = 24, dl: DataLayer = Depends(get_data_layer)):
+async def full_run(req: GenerateRequest = GenerateRequest(), since_hours: int = 24, dl: DataLayer = Depends(get_data_layer)):
     """Full pipeline: scout → brief → generate → humanize → queue."""
+    channels = req.channels or None
+    team_member = None
+    if req.team_member_id:
+        members = await dl.list_team_members()
+        team_member = next((m for m in members if m["id"] == req.team_member_id), None)
     api_key = await dl.resolve_api_key()
     org_settings = await dl.get_all_settings()
-    raw_signals = await run_full_scout(since_hours, org_settings=org_settings)
-
-    # Relevance filter — discard off-topic noise before generating content
     voice = await dl.get_voice_settings()
     company_ctx = _build_company_context(voice)
+    raw_signals = await run_full_scout(
+        since_hours, org_settings=org_settings,
+        api_key=api_key, company_context=company_ctx,
+    )
+
+    # Relevance filter — discard off-topic noise before generating content
     filtered_signals = await filter_signals_for_relevance(raw_signals, company_ctx, api_key=api_key)
 
     # Prune old signals + dedup
@@ -238,13 +261,17 @@ async def full_run(since_hours: int = 24, dl: DataLayer = Depends(get_data_layer
     # Load assets for system prompt context
     assets = await dl.list_assets()
 
+    # Parse channels
+    target_channels = [ContentChannel(c) for c in channels] if channels else None
+
     # Generate all channels — each gets targeted signals and its own angle
     content_items = await generate_all_content(
-        brief_data, signal_dicts,
+        brief_data, signal_dicts, target_channels,
         memory=memory, voice_settings=voice, assets=assets,
-        api_key=api_key,
+        api_key=api_key, team_member=team_member,
     )
 
+    author = f"team:{team_member['id']}" if team_member else "company"
     saved_content = []
     for item in content_items:
         raw_body = item["body"]
@@ -257,7 +284,7 @@ async def full_run(since_hours: int = 24, dl: DataLayer = Depends(get_data_layer
             "headline": item["headline"],
             "body": clean_body,
             "body_raw": raw_body,
-            "author": "company",
+            "author": author,
             "source_signal_ids": item.get("source_signal_ids", ""),
         })
         saved_content.append(result)
@@ -275,3 +302,71 @@ async def full_run(since_hours: int = 24, dl: DataLayer = Depends(get_data_layer
         "brief": {"id": brief.get("id"), "angle": brief_data["angle"]},
         "content": [{"id": c.get("id"), "channel": c.get("channel", ""), "headline": c.get("headline", "")} for c in saved_content],
     }
+
+
+class VisibilityRequest(BaseModel):
+    domain: str
+    queries: list[str] = []
+
+
+@router.post("/visibility")
+async def check_visibility(req: VisibilityRequest, dl: DataLayer = Depends(get_data_layer)):
+    """Check how visible a company's domain is in Claude web search results.
+
+    Searches for each query and checks if the domain appears.
+    Returns per-query results + overall visibility score.
+    """
+    if not req.domain:
+        return {"error": "Domain is required"}
+
+    queries = req.queries
+    if not queries:
+        # Fall back to web queries from settings, then HN keywords
+        org_settings = await dl.get_all_settings()
+        queries = _parse_json_list_safe(org_settings.get("scout_web_queries", ""))
+        if not queries:
+            queries = _parse_json_list_safe(org_settings.get("scout_hn_keywords", ""))
+        if not queries:
+            return {"error": "No queries provided and none configured in scout settings"}
+
+    api_key = await dl.resolve_api_key()
+    result = await scout_visibility_check(queries, req.domain, api_key=api_key)
+    return result
+
+
+def _parse_json_list_safe(raw: str) -> list:
+    """Parse a JSON list from a settings string."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return parsed if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+@router.post("/suggest-sources")
+async def suggest_sources(dl: DataLayer = Depends(get_data_layer)):
+    """Use Claude to suggest scout sources based on company context.
+
+    Returns suggested subreddits, HN keywords, RSS feeds, and web search queries.
+    Excludes sources already configured.
+    """
+    api_key = await dl.resolve_api_key()
+    if not api_key:
+        return {"error": "No Anthropic API key configured."}
+
+    voice = await dl.get_voice_settings()
+    company_ctx = _build_company_context(voice)
+
+    if company_ctx == "General technology company":
+        return {"error": "No company profile found. Complete onboarding first so we know what to suggest."}
+
+    # Gather existing sources to avoid duplicates
+    org_settings = await dl.get_all_settings()
+    existing = {}
+    for key in ["scout_subreddits", "scout_hn_keywords", "scout_rss_feeds", "scout_web_queries"]:
+        existing[key] = _parse_json_list_safe(org_settings.get(key, ""))
+
+    result = await suggest_scout_sources(company_ctx, existing_sources=existing, api_key=api_key)
+    return result

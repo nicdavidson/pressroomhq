@@ -161,7 +161,8 @@ def _build_voice_block(voice_settings: dict | None) -> str:
 
 
 def _build_system_prompt(channel: ContentChannel, voice_settings: dict | None,
-                         assets: list[dict] | None = None) -> str:
+                         assets: list[dict] | None = None,
+                         team_member: dict | None = None) -> str:
     """Build the system prompt — positions as the company's writer, not a generic engine."""
     channel_config = CHANNEL_RULES.get(channel)
     if not channel_config:
@@ -213,14 +214,40 @@ GOLDEN ANCHOR: The following statement is this company's north star message. Wea
     if assets:
         asset_block = "\n\n" + _build_asset_map_block(assets)
 
-    return f"""You are writing as {company}'s content team. {persona}
+    # Team member persona injection
+    if team_member:
+        member_name = team_member.get("name", "")
+        member_title = team_member.get("title", "")
+        member_bio = team_member.get("bio", "")
+        member_expertise = team_member.get("expertise_tags", [])
+        if isinstance(member_expertise, str):
+            try:
+                member_expertise = json.loads(member_expertise)
+            except (json.JSONDecodeError, TypeError):
+                member_expertise = []
+        expertise_str = ", ".join(member_expertise) if member_expertise else ""
+
+        author_line = f"You are writing as {member_name}, {member_title} at {company}."
+        author_block = f"""
+
+AUTHOR VOICE:
+You are posting as {member_name} ({member_title}), a real person at {company}. Write in first person.
+{f'Their bio: {member_bio}' if member_bio else ''}
+{f'Their expertise: {expertise_str}' if expertise_str else ''}
+The post should sound like a knowledgeable professional sharing their perspective — not a company press release.
+Use "I" and "we" naturally. Draw on {member_name}'s expertise to add credibility."""
+    else:
+        author_line = f"You are writing as {company}'s content team."
+        author_block = ""
+
+    return f"""{author_line} {persona}
 
 Your audience: {audience}
 Your tone: {tone}
 
 You're writing a {channel_config['headline_prefix']} post based on today's intelligence signals.{style_line}
 
-{voice_block}{comp_block}{anchor_block}{asset_block}
+{voice_block}{author_block}{comp_block}{anchor_block}{asset_block}
 
 CONTENT RULES FOR {channel_config['headline_prefix']}:
 {channel_config['rules']}
@@ -444,13 +471,14 @@ async def generate_content(brief: dict, signals: list[dict], channel: ContentCha
                            memory: dict | None = None,
                            voice_settings: dict | None = None,
                            assets: list[dict] | None = None,
-                           api_key: str | None = None) -> dict:
+                           api_key: str | None = None,
+                           team_member: dict | None = None) -> dict:
     """Generate content for a specific channel with targeted signals and channel-specific angle."""
     channel_config = CHANNEL_RULES.get(channel)
     if not channel_config:
         raise ValueError(f"No config for channel: {channel}")
 
-    system_prompt = _build_system_prompt(channel, voice_settings, assets=assets)
+    system_prompt = _build_system_prompt(channel, voice_settings, assets=assets, team_member=team_member)
 
     # Select the best signals for this channel
     ranked_signals = _rank_signals_for_channel(signals, channel)
@@ -528,7 +556,8 @@ async def generate_all_content(brief: dict, signals: list[dict],
                                 memory: dict | None = None,
                                 voice_settings: dict | None = None,
                                 assets: list[dict] | None = None,
-                                api_key: str | None = None) -> list[dict]:
+                                api_key: str | None = None,
+                                team_member: dict | None = None) -> list[dict]:
     """Generate content across all channels (or specified subset).
     Each channel gets its own signal selection and editorial angle."""
     target_channels = channels or [
@@ -553,7 +582,7 @@ async def generate_all_content(brief: dict, signals: list[dict],
 
     results = []
     for channel in target_channels:
-        result = await generate_content(brief, signals, channel, memory=memory, voice_settings=voice_settings, assets=assets, api_key=api_key)
+        result = await generate_content(brief, signals, channel, memory=memory, voice_settings=voice_settings, assets=assets, api_key=api_key, team_member=team_member)
         results.append(result)
 
     return results
@@ -596,7 +625,8 @@ async def regenerate_single(content_body: str, channel: ContentChannel,
 # ─── Story-based generation ─────────────────────────────
 
 async def generate_from_story(story: dict, dl, channels: list[str] | None = None,
-                               api_key: str | None = None) -> list[dict]:
+                               api_key: str | None = None,
+                               team_member: dict | None = None) -> list[dict]:
     """Generate content from a curated story — editorial context + curated signals.
 
     Reuses the existing generate_content pipeline by packing the story's
@@ -646,9 +676,10 @@ async def generate_from_story(story: dict, dl, channels: list[str] | None = None
     content_items = await generate_all_content(
         synthetic_brief, signal_dicts, target_channels,
         memory=memory, voice_settings=voice, assets=assets,
-        api_key=api_key,
+        api_key=api_key, team_member=team_member,
     )
 
+    author = f"team:{team_member['id']}" if team_member else "company"
     saved = []
     for item in content_items:
         raw_body = item["body"]
@@ -661,7 +692,7 @@ async def generate_from_story(story: dict, dl, channels: list[str] | None = None
             "headline": item["headline"],
             "body": clean_body,
             "body_raw": raw_body,
-            "author": "company",
+            "author": author,
             "source_signal_ids": item.get("source_signal_ids", ""),
         })
         saved.append(result)

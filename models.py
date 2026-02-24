@@ -13,6 +13,7 @@ class SignalType(str, enum.Enum):
     reddit = "reddit"
     rss = "rss"
     trend = "trend"
+    web_search = "web_search"
     support = "support"
     performance = "performance"
 
@@ -61,6 +62,7 @@ class Organization(Base):
     blog_posts = relationship("BlogPost", back_populates="org", cascade="all, delete-orphan")
     email_drafts = relationship("EmailDraft", back_populates="org", cascade="all, delete-orphan")
     seo_pr_runs = relationship("SeoPrRun", back_populates="org", cascade="all, delete-orphan")
+    site_properties = relationship("SiteProperty", back_populates="org", cascade="all, delete-orphan")
 
 
 class Signal(Base):
@@ -116,6 +118,7 @@ class Content(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     approved_at = Column(DateTime, nullable=True)
     published_at = Column(DateTime, nullable=True)
+    scheduled_at = Column(DateTime, nullable=True)  # when to auto-publish (None = immediate on approve)
 
     org = relationship("Organization", back_populates="contents")
     signal = relationship("Signal", back_populates="contents")
@@ -257,17 +260,37 @@ class SeoPrRun(Base):
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
     domain = Column(String(500), nullable=False)
     repo_url = Column(String(1000), default="")
-    status = Column(String(50), default="pending")  # pending, auditing, analyzing, implementing, pushing, complete, failed
+    status = Column(String(50), default="pending")  # pending, auditing, analyzing, implementing, pushing, verifying, healing, complete, failed
     audit_id = Column(Integer, nullable=True)  # reference to audit_results
     plan_json = Column(Text, default="{}")  # the tiered plan
     pr_url = Column(String(1000), default="")
     branch_name = Column(String(255), default="")
     error = Column(Text, default="")
     changes_made = Column(Integer, default=0)
+    deploy_status = Column(String(50), default="")  # pending, success, failed, healed
+    deploy_log = Column(Text, default="")  # build log excerpt on failure
+    heal_attempts = Column(Integer, default=0)  # how many fix attempts
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
 
     org = relationship("Organization", back_populates="seo_pr_runs")
+
+
+class SiteProperty(Base):
+    """Bonded site + repo — links a domain to its source repo for SEO workflows."""
+    __tablename__ = "site_properties"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    name = Column(String(255), nullable=False)           # "DreamFactory Docs"
+    domain = Column(String(500), nullable=False)          # "docs.dreamfactory.com"
+    repo_url = Column(String(1000), default="")           # "https://github.com/owner/repo" (optional)
+    base_branch = Column(String(100), default="main")
+    last_audit_score = Column(Integer, nullable=True)
+    last_audit_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    org = relationship("Organization", back_populates="site_properties")
 
 
 class Setting(Base):

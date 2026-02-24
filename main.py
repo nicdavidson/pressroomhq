@@ -27,10 +27,14 @@ from api.blog import router as blog_router
 from api.email import router as email_router
 from api.hubspot import router as hubspot_router
 from api.seo_pr import router as seo_pr_router
+from api.properties import router as properties_router
+from api.analytics import router as analytics_router
+from api.slack import router as slack_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
     await init_db()
 
     # Load account-level settings (API keys, models) into runtime config at boot
@@ -41,7 +45,13 @@ async def lifespan(app: FastAPI):
         dl = DataLayer(session, org_id=None)
         await _sync_to_runtime(dl)
 
+    # Start background scheduler for timed content publishing
+    from services.scheduler import scheduler_loop
+    scheduler_task = asyncio.create_task(scheduler_loop())
+
     yield
+
+    scheduler_task.cancel()
 
 
 app = FastAPI(
@@ -82,6 +92,9 @@ app.include_router(blog_router)
 app.include_router(email_router)
 app.include_router(hubspot_router)
 app.include_router(seo_pr_router)
+app.include_router(properties_router)
+app.include_router(analytics_router)
+app.include_router(slack_router)
 
 # Serve frontend static files if built — MUST be last (catch-all)
 frontend_dist = Path(__file__).parent / "frontend" / "dist"

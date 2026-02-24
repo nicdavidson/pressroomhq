@@ -451,11 +451,13 @@ Return ONLY a valid JSON object with:
 
 - rss_feeds: array of 3-5 RSS feed URLs for industry blogs, competitor blogs, or news sources. Only include feeds you're confident exist (major tech blogs, known company blogs).
 
+- web_queries: array of 5-8 web search queries that would surface relevant industry content, competitor activity, or market trends. These are used for ongoing web search monitoring. Think about what a content marketer at this company would Google to find content opportunities and stay informed.
+
 Be SPECIFIC to this company. A DreamFactory (API platform) company should NOT get r/homelab. An e-commerce company should NOT get r/webdev. Think about WHO their customers are and WHERE those people talk."""
 
     response = _get_client(api_key).messages.create(
         model=settings.claude_model_fast,
-        max_tokens=1500,
+        max_tokens=2000,
         system="You are a content strategist. Return valid JSON only, no markdown fences.",
         messages=[{"role": "user", "content": prompt}],
     )

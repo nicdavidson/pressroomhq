@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import ChannelPicker, { loadSavedChannels, saveChannels } from './ChannelPicker'
 
 const API = '/api'
 
@@ -9,6 +10,11 @@ export default function StoryWorkbench({ orgId, signals }) {
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
   const [digging, setDigging] = useState(null) // signal id currently digging
+  const [discovering, setDiscovering] = useState(null) // 'web' | 'wire' | null
+  const [discovered, setDiscovered] = useState([]) // discovered signals from search
+  const [selectedChannels, setSelectedChannels] = useState(() => loadSavedChannels(orgId))
+  const [teamMembers, setTeamMembers] = useState([])
+  const [postAs, setPostAs] = useState('') // '' = company, or team member id
 
   const headers = { 'Content-Type': 'application/json', ...(orgId ? { 'X-Org-Id': String(orgId) } : {}) }
 
@@ -33,6 +39,9 @@ export default function StoryWorkbench({ orgId, signals }) {
 
   useEffect(() => { fetchStories() }, [fetchStories])
   useEffect(() => { if (selectedId) fetchStory(selectedId) }, [selectedId, fetchStory])
+  useEffect(() => {
+    fetch(`${API}/team`, { headers }).then(r => r.json()).then(d => setTeamMembers(Array.isArray(d) ? d : [])).catch(() => {})
+  }, [orgId])
 
   // ── CRUD ──
   const createStory = async () => {
@@ -94,13 +103,36 @@ export default function StoryWorkbench({ orgId, signals }) {
     setDigging(null)
   }
 
+  // ── Signal Discovery ──
+  const discoverSignals = async (mode) => {
+    if (!selectedId) return
+    setDiscovering(mode)
+    setDiscovered([])
+    try {
+      const res = await fetch(`${API}/stories/${selectedId}/discover`, {
+        method: 'POST', headers, body: JSON.stringify({ mode })
+      })
+      const data = await res.json()
+      if (data.error) {
+        setDiscovered([])
+      } else {
+        setDiscovered(data.signals || [])
+      }
+    } catch { /* ignore */ }
+    setDiscovering(null)
+  }
+
   // ── Generate ──
   const generateFromStory = async () => {
-    if (!selectedId) return
+    if (!selectedId || selectedChannels.length === 0) return
+    saveChannels(orgId, selectedChannels)
     setGenerating(true)
     try {
       await fetch(`${API}/stories/${selectedId}/generate`, {
-        method: 'POST', headers, body: JSON.stringify({ channels: [] })
+        method: 'POST', headers, body: JSON.stringify({
+          channels: selectedChannels,
+          team_member_id: postAs ? Number(postAs) : null,
+        })
       })
       fetchStory(selectedId)
       fetchStories()
@@ -228,6 +260,48 @@ export default function StoryWorkbench({ orgId, signals }) {
               )}
             </div>
 
+            {/* Signal Discovery */}
+            <div className="story-section">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div className="section-label" style={{ margin: 0 }}>Find Signals</div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    className={`btn btn-sm ${discovering === 'wire' ? 'loading' : ''}`}
+                    onClick={() => discoverSignals('wire')}
+                    disabled={!!discovering || (selected.signals || []).length === 0}
+                    title="Rank existing wire signals by relevance to this story"
+                  >
+                    {discovering === 'wire' ? 'Scanning...' : 'Search Wire'}
+                  </button>
+                  <button
+                    className={`btn btn-sm ${discovering === 'web' ? 'loading' : ''}`}
+                    onClick={() => discoverSignals('web')}
+                    disabled={!!discovering}
+                    title="Search the web for new signals related to this story"
+                    style={{ borderColor: 'var(--amber)', color: 'var(--amber)' }}
+                  >
+                    {discovering === 'web' ? 'Searching...' : 'Search Web'}
+                  </button>
+                </div>
+              </div>
+              {discovered.length > 0 && (
+                <div className="story-wire-list">
+                  {discovered.map(s => (
+                    <div key={s.id} className="story-wire-item" style={{ borderLeft: '2px solid var(--amber)' }}>
+                      <span className="story-signal-type">{s.type || 'web'}</span>
+                      <span className="story-wire-title">{s.title}</span>
+                      <button className="btn btn-sm btn-approve" onClick={() => { addSignal(s.id); setDiscovered(prev => prev.filter(d => d.id !== s.id)) }}>+</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {discovering && (
+                <p style={{ color: 'var(--amber)', fontSize: 11, margin: '8px 0 0' }}>
+                  {discovering === 'web' ? 'Searching the web for related signals...' : 'Ranking wire signals by relevance...'}
+                </p>
+              )}
+            </div>
+
             {/* Add from wire */}
             {availableSignals.length > 0 && (
               <div className="story-section">
@@ -246,13 +320,32 @@ export default function StoryWorkbench({ orgId, signals }) {
 
             {/* Generate */}
             <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', gap: 16, marginBottom: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <div className="section-label" style={{ marginBottom: 8 }}>Channels</div>
+                  <ChannelPicker selected={selectedChannels} onChange={setSelectedChannels} />
+                </div>
+                <div>
+                  <div className="section-label" style={{ marginBottom: 8 }}>Post As</div>
+                  <select
+                    className="post-as-select"
+                    value={postAs}
+                    onChange={e => setPostAs(e.target.value)}
+                  >
+                    <option value="">Company</option>
+                    {teamMembers.map(m => (
+                      <option key={m.id} value={m.id}>{m.name}{m.title ? ` — ${m.title}` : ''}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
               <button
                 className={`btn btn-approve ${generating ? 'loading' : ''}`}
                 onClick={generateFromStory}
-                disabled={generating || (selected.signals || []).length === 0}
-                style={{ width: '100%', padding: '10px 0', fontSize: 13 }}
+                disabled={generating || (selected.signals || []).length === 0 || selectedChannels.length === 0}
+                style={{ width: '100%', padding: '10px 0', fontSize: 13, marginTop: 12 }}
               >
-                {generating ? 'Generating...' : `Generate from Story (${selected.signals?.length || 0} signals)`}
+                {generating ? 'Generating...' : `Generate ${selectedChannels.length} Channels (${selected.signals?.length || 0} signals)`}
               </button>
             </div>
           </>

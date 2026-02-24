@@ -22,6 +22,10 @@ async def init_db():
             "ALTER TABLE signals ADD COLUMN times_used INTEGER DEFAULT 0",
             "ALTER TABLE signals ADD COLUMN times_spiked INTEGER DEFAULT 0",
             "ALTER TABLE content ADD COLUMN source_signal_ids TEXT DEFAULT ''",
+            "ALTER TABLE seo_pr_runs ADD COLUMN deploy_status VARCHAR(50) DEFAULT ''",
+            "ALTER TABLE seo_pr_runs ADD COLUMN deploy_log TEXT DEFAULT ''",
+            "ALTER TABLE seo_pr_runs ADD COLUMN heal_attempts INTEGER DEFAULT 0",
+            "ALTER TABLE content ADD COLUMN scheduled_at DATETIME",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(stmt))

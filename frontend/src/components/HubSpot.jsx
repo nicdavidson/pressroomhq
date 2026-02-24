@@ -8,17 +8,14 @@ function orgHeaders(orgId) {
   return h
 }
 
-export default function HubSpot({ onLog, orgId }) {
+export default function HubSpot({ onLog, orgId, onNavigate }) {
   const [status, setStatus] = useState({})
-  const [apiKey, setApiKey] = useState('')
-  const [connecting, setConnecting] = useState(false)
   const [blogs, setBlogs] = useState([])
   const [contacts, setContacts] = useState([])
   const [loadingBlogs, setLoadingBlogs] = useState(false)
   const [loadingContacts, setLoadingContacts] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [publishing, setPublishing] = useState(false)
-  // Approved blog content for the push dropdown
   const [blogContent, setBlogContent] = useState([])
   const [selectedContentId, setSelectedContentId] = useState('')
 
@@ -32,7 +29,6 @@ export default function HubSpot({ onLog, orgId }) {
     }
   }, [orgId])
 
-  // Load approved blog content for the push dropdown
   const loadBlogContent = useCallback(async () => {
     try {
       const res = await fetch(`${API}/content?limit=100`, { headers: orgHeaders(orgId) })
@@ -48,45 +44,6 @@ export default function HubSpot({ onLog, orgId }) {
     loadStatus()
     loadBlogContent()
   }, [loadStatus, loadBlogContent])
-
-  const connect = async () => {
-    if (!apiKey.trim()) return
-    setConnecting(true)
-    try {
-      const res = await fetch(`${API}/hubspot/connect`, {
-        method: 'POST',
-        headers: orgHeaders(orgId),
-        body: JSON.stringify({ api_key: apiKey }),
-      })
-      const data = await res.json()
-      if (data.error) {
-        onLog?.(`HUBSPOT CONNECT FAILED — ${data.error}`, 'error')
-      } else {
-        onLog?.(`HUBSPOT CONNECTED — portal ${data.portal_id}`, 'success')
-        setApiKey('')
-        await loadStatus()
-      }
-    } catch (e) {
-      onLog?.(`HUBSPOT ERROR — ${e.message}`, 'error')
-    } finally {
-      setConnecting(false)
-    }
-  }
-
-  const disconnect = async () => {
-    try {
-      await fetch(`${API}/hubspot/disconnect`, {
-        method: 'DELETE',
-        headers: orgHeaders(orgId),
-      })
-      setStatus({ connected: false, configured: false })
-      setBlogs([])
-      setContacts([])
-      onLog?.('HUBSPOT DISCONNECTED', 'warn')
-    } catch (e) {
-      onLog?.(`DISCONNECT FAILED — ${e.message}`, 'error')
-    }
-  }
 
   const fetchBlogs = async () => {
     setLoadingBlogs(true)
@@ -176,51 +133,25 @@ export default function HubSpot({ onLog, orgId }) {
     <div className="connections-panel">
       <h2 className="section-title">HUBSPOT</h2>
 
-      {/* Connection Section */}
-      <div className="connections-section">
-        <h3 className="subsection-title">Connection</h3>
-        <p className="section-desc">
-          Connect a HubSpot private app to sync blog posts and push content as drafts.
-        </p>
-
-        <div className="connection-cards">
-          <div className={`connection-card ${isConnected ? 'connected' : ''}`}>
-            <div className="connection-card-header">
-              <span className="connection-name">HubSpot</span>
-              <span className={`connection-status ${isConnected ? 'active' : 'inactive'}`}>
-                {isConnected ? 'CONNECTED' : 'NOT CONNECTED'}
-              </span>
-            </div>
-            {isConnected && status.hub_domain && (
-              <div className="connection-detail">{status.hub_domain}</div>
+      {/* Not connected — point to Connections */}
+      {!isConnected && (
+        <div className="connections-section">
+          <p className="section-desc">
+            HubSpot is not connected.{' '}
+            {onNavigate ? (
+              <button
+                className="btn btn-sm"
+                style={{ marginLeft: 8 }}
+                onClick={() => onNavigate('connections')}
+              >
+                Connect in Connections
+              </button>
+            ) : (
+              <span>Connect HubSpot in the Connections tab.</span>
             )}
-            {isConnected && status.portal_id && (
-              <div className="connection-detail dim">Portal ID: {status.portal_id}</div>
-            )}
-            {!isConnected && (
-              <div className="form-row" style={{ marginTop: 8 }}>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={e => setApiKey(e.target.value)}
-                  placeholder="pat-na1-xxxxxxxx"
-                  onKeyDown={e => { if (e.key === 'Enter') connect() }}
-                />
-              </div>
-            )}
-            <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
-              {!isConnected && (
-                <button className="btn btn-sm" onClick={connect} disabled={connecting || !apiKey.trim()}>
-                  {connecting ? 'Connecting...' : 'Connect'}
-                </button>
-              )}
-              {isConnected && (
-                <button className="btn btn-sm btn-danger" onClick={disconnect}>Disconnect</button>
-              )}
-            </div>
-          </div>
+          </p>
         </div>
-      </div>
+      )}
 
       {/* Blog Sync Section */}
       {isConnected && (
