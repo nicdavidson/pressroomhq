@@ -2646,6 +2646,21 @@ select.setting-input {
   text-transform: uppercase;
 }
 
+/* ── Company Settings ── */
+.company-field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.company-field-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
 /* ── Dashboard ── */
 .dash-stats-row {
   display: flex;

@@ -73,6 +73,7 @@ DEFAULTS = {
     "onboard_topics": "[]",
     "onboard_competitors": "[]",
     "onboard_complete": "",
+    "social_profiles": "{}",
     "df_service_map": "",
     # Slack notifications
     "slack_webhook_url": "",

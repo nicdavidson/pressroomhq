@@ -13,6 +13,7 @@ import Blog from './components/Blog'
 import EmailDrafts from './components/EmailDrafts'
 import HubSpot from './components/HubSpot'
 import Dashboard from './components/Dashboard'
+import Company from './components/Company'
 import ChannelPicker, { loadSavedChannels, saveChannels } from './components/ChannelPicker'
 
 const API = '/api'
@@ -476,6 +477,7 @@ export default function App() {
               { view: 'assets', label: 'Assets' },
             ]} currentView={view} setView={setView} />
             <NavDropdown label="Config" items={[
+              { view: 'company', label: 'Company' },
               { view: 'connections', label: 'Connect' },
               { view: 'settings', label: 'Account' },
             ]} currentView={view} setView={setView} />
@@ -540,7 +542,7 @@ export default function App() {
             </div>
           )}
 
-          {(view === 'settings' || view === 'voice' || view === 'scout' || view === 'import' || view === 'blog' || view === 'onboard' || view === 'connections' || view === 'hubspot' || view === 'audit' || view === 'assets' || view === 'team' || view === 'dashboard') && (
+          {(view === 'settings' || view === 'voice' || view === 'scout' || view === 'import' || view === 'blog' || view === 'onboard' || view === 'connections' || view === 'hubspot' || view === 'audit' || view === 'assets' || view === 'team' || view === 'dashboard' || view === 'company') && (
             <div className="pressroom" style={{ gridTemplateColumns: '1fr' }}>
               <div className="desk-area" style={{ gridTemplateRows: '1fr 220px' }}>
                 {view === 'settings' && <Settings onLog={log} orgId={orgId} />}
@@ -555,6 +557,7 @@ export default function App() {
                 {view === 'assets' && <Assets orgId={orgId} />}
                 {view === 'team' && <Team orgId={orgId} />}
                 {view === 'dashboard' && <Dashboard orgId={orgId} />}
+                {view === 'company' && <Company orgId={orgId} onLog={log} />}
                 <div className="log-panel">
                   <div className="panel-header">
                     <span>Activity Log</span>

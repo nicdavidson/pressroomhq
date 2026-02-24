@@ -5,11 +5,18 @@ repos, social profiles, API endpoints. Discovered during onboarding or
 added manually by the editor.
 """
 
+import json
+import logging
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from config import settings
 from database import get_data_layer
 from services.data_layer import DataLayer
+from services.scout import discover_github_repos
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
 
@@ -69,3 +76,43 @@ async def delete_asset(asset_id: int, dl: DataLayer = Depends(get_data_layer)):
         return {"error": "Asset not found"}
     await dl.commit()
     return {"deleted": asset_id}
+
+
+@router.post("/github/sync-orgs")
+async def sync_github_orgs(dl: DataLayer = Depends(get_data_layer)):
+    """Discover all repos from configured GitHub orgs and add as assets."""
+    orgs_raw = await dl.get_setting("scout_github_orgs")
+    orgs = json.loads(orgs_raw) if orgs_raw else []
+    if not orgs:
+        return {"error": "No GitHub organizations configured. Add them in Company settings."}
+
+    gh_token = await dl.get_setting("github_token") or settings.github_token
+    existing = {a["url"].lower() for a in await dl.list_assets(asset_type="repo")}
+
+    added = 0
+    per_org = {}
+    for org_name in orgs:
+        try:
+            repos = await discover_github_repos(org_name, gh_token=gh_token)
+            org_added = 0
+            for repo in repos:
+                url = f"https://github.com/{repo}"
+                if url.lower() not in existing:
+                    await dl.save_asset({
+                        "asset_type": "repo",
+                        "url": url,
+                        "label": repo.split("/")[-1],
+                        "description": f"From {org_name} org",
+                        "discovered_via": "github_org_sync",
+                    })
+                    existing.add(url.lower())
+                    org_added += 1
+            per_org[org_name] = {"found": len(repos), "added": org_added}
+            added += org_added
+            log.info("GITHUB SYNC — %s: %d found, %d new", org_name, len(repos), org_added)
+        except Exception as e:
+            per_org[org_name] = {"error": str(e)}
+            log.warning("GITHUB SYNC — %s failed: %s", org_name, e)
+
+    await dl.commit()
+    return {"synced": added, "orgs": per_org}
