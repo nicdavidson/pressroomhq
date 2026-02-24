@@ -30,6 +30,7 @@ from api.seo_pr import router as seo_pr_router
 from api.properties import router as properties_router
 from api.analytics import router as analytics_router
 from api.slack import router as slack_router
+from api.company_audit import router as company_audit_router
 
 
 @asynccontextmanager
@@ -95,6 +96,7 @@ app.include_router(seo_pr_router)
 app.include_router(properties_router)
 app.include_router(analytics_router)
 app.include_router(slack_router)
+app.include_router(company_audit_router)
 
 # Serve frontend static files if built — MUST be last (catch-all)
 frontend_dist = Path(__file__).parent / "frontend" / "dist"

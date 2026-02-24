@@ -49,6 +49,8 @@ export default function Company({ orgId, onLog }) {
   const [saving, setSaving] = useState(null) // which section is saving
   const [syncing, setSyncing] = useState(false)
   const [syncResult, setSyncResult] = useState(null)
+  const [auditing, setAuditing] = useState(false)
+  const [auditResults, setAuditResults] = useState(null)
 
   const headers = orgHeaders(orgId)
 
@@ -151,12 +153,71 @@ export default function Company({ orgId, onLog }) {
     setSyncing(false)
   }
 
+  const runAudit = async () => {
+    setAuditing(true)
+    setAuditResults(null)
+    onLog?.('AUDIT — analyzing company digital presence...', 'action')
+    try {
+      const res = await fetch(`${API}/company/audit`, { method: 'POST', headers })
+      const data = await res.json()
+      if (data.error) {
+        onLog?.(`AUDIT FAILED — ${data.error}`, 'error')
+      } else {
+        const crit = (data.findings || []).filter(f => f.severity === 'critical').length
+        const warn = (data.findings || []).filter(f => f.severity === 'warning').length
+        const opp = (data.findings || []).filter(f => f.severity === 'opportunity').length
+        setAuditResults(data.findings || [])
+        onLog?.(`AUDIT COMPLETE — ${crit} critical, ${warn} warnings, ${opp} opportunities`, 'success')
+      }
+    } catch (e) {
+      onLog?.(`AUDIT ERROR — ${e.message}`, 'error')
+    }
+    setAuditing(false)
+  }
+
+  const severityIcon = { critical: '\u26A0', warning: '\u25CB', opportunity: '\u2197' }
+  const severityColor = { critical: 'var(--red, #c44)', warning: 'var(--amber)', opportunity: 'var(--green)' }
+
   return (
     <div className="settings-page">
       <div className="settings-header">
         <h2 className="settings-title">Company</h2>
-        <p className="settings-description">Company identity, social profiles, and GitHub organizations.</p>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button
+            className={`btn btn-run ${auditing ? 'loading' : ''}`}
+            onClick={runAudit}
+            disabled={auditing}
+          >
+            {auditing ? 'Auditing...' : 'Run Company Audit'}
+          </button>
+        </div>
       </div>
+
+      {/* AUDIT RESULTS */}
+      {auditResults && (
+        <div className="settings-section">
+          <div className="section-label">
+            Audit Findings <span className="section-count">{auditResults.length}</span>
+          </div>
+          {auditResults.length === 0 ? (
+            <p style={{ color: 'var(--green)', fontSize: 12 }}>No issues found. Looking good.</p>
+          ) : (
+            <div className="audit-findings">
+              {auditResults.map((f, i) => (
+                <div key={i} className="audit-finding" style={{ borderLeftColor: severityColor[f.severity] || 'var(--border)' }}>
+                  <div className="audit-finding-header">
+                    <span style={{ color: severityColor[f.severity], marginRight: 6 }}>{severityIcon[f.severity]}</span>
+                    <span className="audit-finding-title">{f.title}</span>
+                    <span className="audit-finding-category">{f.category}</span>
+                  </div>
+                  <div className="audit-finding-detail">{f.detail}</div>
+                  {f.metric && <div className="audit-finding-metric">{f.metric}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* IDENTITY */}
       <div className="settings-section">
