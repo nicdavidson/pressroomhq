@@ -10,6 +10,13 @@ function orgHeaders(orgId) {
 
 const SOURCE_TYPES = [
   {
+    key: 'scout_github_orgs',
+    label: 'GitHub Organizations',
+    placeholder: 'org name (e.g. treehouse)',
+    signalTypes: [],
+    signalLabel: 'ORG',
+  },
+  {
     key: 'scout_github_repos',
     label: 'GitHub Repos',
     placeholder: 'owner/repo',
