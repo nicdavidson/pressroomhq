@@ -11,7 +11,7 @@ from services.data_layer import DataLayer
 log = logging.getLogger("pressroom")
 
 # Channels that support direct publishing
-DIRECT_CHANNELS = {"linkedin", "facebook"}
+DIRECT_CHANNELS = {"linkedin", "x_thread", "facebook"}
 
 
 async def publish_single(content: dict, settings: dict) -> dict:
@@ -19,7 +19,7 @@ async def publish_single(content: dict, settings: dict) -> dict:
     channel = content.get("channel", "")
     text = content.get("body", "")
 
-    if channel == "linkedin":
+    if channel in ("linkedin", "x_thread"):
         token = settings.get("linkedin_access_token", "")
         author = settings.get("linkedin_author_urn", "")
         if not token or not author:

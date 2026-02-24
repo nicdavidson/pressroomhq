@@ -67,32 +67,74 @@ async def linkedin_exchange_code(client_id: str, client_secret: str,
         }
 
 
-async def linkedin_post(access_token: str, author_urn: str, text: str) -> dict:
-    """Post to LinkedIn using the v2 Posts API."""
+async def linkedin_post(access_token: str, author_urn: str, text: str,
+                        article_url: str = "", article_title: str = "") -> dict:
+    """Post to LinkedIn using the REST Posts API (v2 ugcPosts is deprecated)."""
     async with httpx.AsyncClient(timeout=15) as c:
+        body = {
+            "author": author_urn,
+            "commentary": text,
+            "visibility": "PUBLIC",
+            "distribution": {
+                "feedDistribution": "MAIN_FEED",
+                "targetEntities": [],
+                "thirdPartyDistributionChannels": [],
+            },
+            "lifecycleState": "PUBLISHED",
+        }
+        # If article URL provided, attach as an article share
+        if article_url:
+            body["content"] = {
+                "article": {
+                    "source": article_url,
+                    "title": article_title or text[:100],
+                },
+            }
+
         resp = await c.post(
-            "https://api.linkedin.com/v2/ugcPosts",
+            "https://api.linkedin.com/rest/posts",
             headers={
                 "Authorization": f"Bearer {access_token}",
+                "LinkedIn-Version": "202402",
                 "X-Restli-Protocol-Version": "2.0.0",
                 "Content-Type": "application/json",
             },
-            json={
-                "author": author_urn,
-                "lifecycleState": "PUBLISHED",
-                "specificContent": {
-                    "com.linkedin.ugc.ShareContent": {
-                        "shareCommentary": {"text": text},
-                        "shareMediaCategory": "NONE",
-                    }
-                },
-                "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
-            },
+            json=body,
         )
         if resp.status_code in (200, 201):
-            return {"success": True, "id": resp.headers.get("x-restli-id", "")}
-        log.error("LinkedIn post failed: %s %s", resp.status_code, resp.text[:500])
-        return {"error": f"LinkedIn API error: {resp.status_code}", "detail": resp.text[:300]}
+            post_id = resp.headers.get("x-restli-id", resp.headers.get("x-linkedin-id", ""))
+            return {"success": True, "id": post_id}
+        # Fallback to legacy ugcPosts if REST API fails (e.g., app not migrated)
+        log.warning("LinkedIn REST Posts API failed (%s), trying legacy ugcPosts", resp.status_code)
+        return await _linkedin_post_legacy(c, access_token, author_urn, text)
+
+
+async def _linkedin_post_legacy(client: httpx.AsyncClient, access_token: str,
+                                 author_urn: str, text: str) -> dict:
+    """Fallback: post via legacy ugcPosts API."""
+    resp = await client.post(
+        "https://api.linkedin.com/v2/ugcPosts",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "X-Restli-Protocol-Version": "2.0.0",
+            "Content-Type": "application/json",
+        },
+        json={
+            "author": author_urn,
+            "lifecycleState": "PUBLISHED",
+            "specificContent": {
+                "com.linkedin.ugc.ShareContent": {
+                    "shareCommentary": {"text": text},
+                    "shareMediaCategory": "NONE",
+                }
+            },
+            "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+        },
+    )
+    if resp.status_code in (200, 201):
+        return {"success": True, "id": resp.headers.get("x-restli-id", "")}
+    log.error("LinkedIn post failed: %s %s", resp.status_code, resp.text[:500])
+    return {"error": f"LinkedIn API error: {resp.status_code}", "detail": resp.text[:300]}
 
 
 # ──────────────────────────────────────

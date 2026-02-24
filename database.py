@@ -19,6 +19,9 @@ async def init_db():
         for stmt in [
             "ALTER TABLE signals ADD COLUMN prioritized INTEGER DEFAULT 0",
             "ALTER TABLE content ADD COLUMN story_id INTEGER REFERENCES stories(id)",
+            "ALTER TABLE signals ADD COLUMN times_used INTEGER DEFAULT 0",
+            "ALTER TABLE signals ADD COLUMN times_spiked INTEGER DEFAULT 0",
+            "ALTER TABLE content ADD COLUMN source_signal_ids TEXT DEFAULT ''",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(stmt))

@@ -9,6 +9,7 @@ Flow:
 
 import json
 import logging
+import time
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Request, Depends
@@ -92,6 +93,9 @@ async def linkedin_callback(request: Request, code: str = "", state: str = "",
         if sub:
             await dl.set_setting("linkedin_author_urn", f"urn:li:person:{sub}")
         await dl.set_setting("linkedin_profile_name", result.get("name", ""))
+        # Track token expiration (LinkedIn tokens last ~60 days)
+        expires_in = result.get("expires_in", 5184000)
+        await dl.set_setting("linkedin_token_expires_at", str(int(time.time()) + int(expires_in)))
         await dl.commit()
 
         log.info("LinkedIn OAuth complete for org %s — user: %s", org_id, result.get("name", "?"))
@@ -186,11 +190,19 @@ async def oauth_status(dl: DataLayer = Depends(get_data_layer)):
 
     all_settings = {**global_settings, **settings}
 
+    # LinkedIn token health
+    li_expires_at = settings.get("linkedin_token_expires_at", "")
+    li_expires_ts = int(li_expires_at) if li_expires_at.isdigit() else 0
+    li_healthy = li_expires_ts > int(time.time()) + 3600 if li_expires_ts else False
+    li_days_left = max(0, (li_expires_ts - int(time.time())) // 86400) if li_expires_ts else 0
+
     return {
         "linkedin": {
             "app_configured": bool(all_settings.get("linkedin_client_id")),
             "connected": bool(settings.get("linkedin_access_token")),
             "profile_name": settings.get("linkedin_profile_name", ""),
+            "token_healthy": li_healthy,
+            "days_remaining": li_days_left,
         },
         "facebook": {
             "app_configured": bool(all_settings.get("facebook_app_id")),

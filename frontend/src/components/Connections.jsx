@@ -161,6 +161,13 @@ export default function Connections({ onLog, orgId }) {
             {linkedin.connected && linkedin.profile_name && (
               <div className="connection-detail">{linkedin.profile_name}</div>
             )}
+            {linkedin.connected && linkedin.days_remaining != null && (
+              <div className={`connection-detail ${linkedin.days_remaining < 7 ? 'warn' : 'dim'}`}>
+                {linkedin.days_remaining > 0
+                  ? `Token expires in ${linkedin.days_remaining} days`
+                  : 'Token expired — reconnect'}
+              </div>
+            )}
             {!linkedin.app_configured ? (
               <div className="connection-detail dim">Set LinkedIn Client ID/Secret in Config first</div>
             ) : (
@@ -168,7 +175,7 @@ export default function Connections({ onLog, orgId }) {
                 className="btn btn-sm"
                 onClick={() => window.location.href = `${API}/oauth/linkedin?org_id=${orgId || 0}`}
               >
-                {linkedin.connected ? 'Reconnect' : 'Connect LinkedIn'}
+                {linkedin.connected ? (linkedin.days_remaining === 0 ? 'Reconnect (Expired)' : 'Reconnect') : 'Connect LinkedIn'}
               </button>
             )}
           </div>
