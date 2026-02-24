@@ -10,6 +10,7 @@ import Assets from './components/Assets'
 import StoryWorkbench from './components/StoryWorkbench'
 import Team from './components/Team'
 import Blog from './components/Blog'
+import EmailDrafts from './components/EmailDrafts'
 
 const API = '/api'
 
@@ -408,6 +409,7 @@ export default function App() {
             <button className={`nav-tab ${view === 'assets' ? 'active' : ''}`} onClick={() => setView('assets')}>Assets</button>
             <button className={`nav-tab ${view === 'team' ? 'active' : ''}`} onClick={() => setView('team')}>Team</button>
             <button className={`nav-tab ${view === 'stories' ? 'active' : ''}`} onClick={() => setView('stories')}>Stories</button>
+            <button className={`nav-tab ${view === 'email' ? 'active' : ''}`} onClick={() => setView('email')}>Email</button>
             <button className={`nav-tab ${view === 'audit' ? 'active' : ''}`} onClick={() => setView('audit')}>Audit</button>
             <button className={`nav-tab ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>Account</button>
             <button className={`nav-tab ${view === 'onboard' ? 'active' : ''}`} onClick={() => setView('onboard')}>+ Company</button>
@@ -464,6 +466,12 @@ export default function App() {
 
         {/* MAIN CONTENT */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {view === 'email' && (
+            <div className="pressroom" style={{ gridTemplateColumns: '1fr' }}>
+              <EmailDrafts orgId={orgId} />
+            </div>
+          )}
+
           {(view === 'settings' || view === 'voice' || view === 'scout' || view === 'import' || view === 'blog' || view === 'onboard' || view === 'connections' || view === 'audit' || view === 'assets' || view === 'team') && (
             <div className="pressroom" style={{ gridTemplateColumns: '1fr' }}>
               <div className="desk-area" style={{ gridTemplateRows: '1fr 220px' }}>

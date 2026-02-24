@@ -59,6 +59,7 @@ class Organization(Base):
     audits = relationship("AuditResult", back_populates="org", cascade="all, delete-orphan")
     team_members = relationship("TeamMember", back_populates="org", cascade="all, delete-orphan")
     blog_posts = relationship("BlogPost", back_populates="org", cascade="all, delete-orphan")
+    email_drafts = relationship("EmailDraft", back_populates="org", cascade="all, delete-orphan")
 
 
 class Signal(Base):
@@ -258,3 +259,23 @@ class Setting(Base):
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     org = relationship("Organization", back_populates="settings")
+
+
+class EmailDraft(Base):
+    """Email draft — composed from release_email or newsletter content."""
+    __tablename__ = "email_drafts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    content_id = Column(Integer, ForeignKey("content.id"), nullable=True)
+    subject = Column(String(500), nullable=False)
+    html_body = Column(Text, nullable=False)
+    text_body = Column(Text, default="")
+    from_name = Column(String(255), default="")
+    status = Column(String(50), default="draft")  # draft, ready, sent
+    recipients = Column(Text, default="[]")  # JSON array of email addresses
+    sent_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    org = relationship("Organization", back_populates="email_drafts")
+    content = relationship("Content")

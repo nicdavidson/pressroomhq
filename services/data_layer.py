@@ -12,7 +12,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import (Signal, Brief, Content, Setting, Organization, DataSource, TeamMember,
-                    CompanyAsset, Story, StorySignal, ApiKey, AuditResult, BlogPost,
+                    CompanyAsset, Story, StorySignal, ApiKey, AuditResult, BlogPost, EmailDraft,
                     SignalType, ContentChannel, ContentStatus, StoryStatus)
 from services.df_client import df
 
@@ -1009,8 +1009,88 @@ class DataLayer:
         await self.db.delete(bp)
         return True
 
+    # ──────────────────────────────────────
+    # Email Drafts
+    # ──────────────────────────────────────
+
+    async def save_email_draft(self, data: dict) -> dict:
+        draft = EmailDraft(
+            org_id=self.org_id,
+            content_id=data.get("content_id"),
+            subject=data["subject"],
+            html_body=data["html_body"],
+            text_body=data.get("text_body", ""),
+            from_name=data.get("from_name", ""),
+            status=data.get("status", "draft"),
+            recipients=json.dumps(data.get("recipients", [])) if isinstance(data.get("recipients"), list) else data.get("recipients", "[]"),
+        )
+        self.db.add(draft)
+        await self.db.flush()
+        return _serialize_email_draft(draft)
+
+    async def list_email_drafts(self, status: str | None = None, limit: int = 20) -> list[dict]:
+        query = select(EmailDraft).order_by(EmailDraft.created_at.desc()).limit(limit)
+        if self.org_id:
+            query = query.where(EmailDraft.org_id == self.org_id)
+        if status:
+            query = query.where(EmailDraft.status == status)
+        result = await self.db.execute(query)
+        return [_serialize_email_draft(ed) for ed in result.scalars().all()]
+
+    async def get_email_draft(self, draft_id: int) -> dict | None:
+        query = select(EmailDraft).where(EmailDraft.id == draft_id)
+        if self.org_id:
+            query = query.where(EmailDraft.org_id == self.org_id)
+        result = await self.db.execute(query)
+        ed = result.scalar_one_or_none()
+        return _serialize_email_draft(ed) if ed else None
+
+    async def update_email_draft(self, draft_id: int, updates: dict) -> dict | None:
+        query = select(EmailDraft).where(EmailDraft.id == draft_id)
+        if self.org_id:
+            query = query.where(EmailDraft.org_id == self.org_id)
+        result = await self.db.execute(query)
+        ed = result.scalar_one_or_none()
+        if not ed:
+            return None
+        for field, value in updates.items():
+            if field == "recipients" and isinstance(value, list):
+                value = json.dumps(value)
+            if hasattr(ed, field) and field not in ("id", "org_id", "created_at"):
+                setattr(ed, field, value)
+        await self.db.flush()
+        return _serialize_email_draft(ed)
+
+    async def delete_email_draft(self, draft_id: int) -> bool:
+        query = select(EmailDraft).where(EmailDraft.id == draft_id)
+        if self.org_id:
+            query = query.where(EmailDraft.org_id == self.org_id)
+        result = await self.db.execute(query)
+        ed = result.scalar_one_or_none()
+        if not ed:
+            return False
+        await self.db.delete(ed)
+        return True
+
     async def commit(self):
         await self.db.commit()
+
+
+def _serialize_email_draft(ed: EmailDraft) -> dict:
+    recipients = ed.recipients or "[]"
+    if isinstance(recipients, str):
+        try:
+            recipients = json.loads(recipients)
+        except (json.JSONDecodeError, ValueError):
+            recipients = []
+    return {
+        "id": ed.id, "org_id": ed.org_id, "content_id": ed.content_id,
+        "subject": ed.subject, "html_body": ed.html_body, "text_body": ed.text_body,
+        "from_name": ed.from_name, "status": ed.status,
+        "recipients": recipients,
+        "sent_at": ed.sent_at.isoformat() if ed.sent_at else None,
+        "created_at": ed.created_at.isoformat() if ed.created_at else None,
+    }
 
 
 def _serialize_content(c: Content) -> dict:
